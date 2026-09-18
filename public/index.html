@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>Montage Drop — загрузка исходников</title>
+  <meta name="description" content="Загрузка и обработка видео в MontageAI">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%236c83ff'/%3E%3Cstop offset='1' stop-color='%2354c8ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='%23161c25'/%3E%3Cpath d='M15 44V20h8l9 13 9-13h8v24h-8V32l-9 12-9-12v12z' fill='url(%23g)'/%3E%3C/svg%3E">
+  <title>MontageAI Studio</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -15,8 +17,8 @@
       <div class="brand">
         <span class="brand-mark" aria-hidden="true"></span>
         <div>
-          <p class="eyebrow">MONTAGE PIPELINE</p>
-          <h1>Загрузка исходников</h1>
+          <p class="eyebrow">MONTAGEAI STUDIO</p>
+          <h1>AI-видеостудия</h1>
         </div>
       </div>
       <div class="server-state" id="serverState">
@@ -26,17 +28,84 @@
     </header>
 
     <div class="access-banner" id="accessBanner" role="status">
-      <span class="access-icon" aria-hidden="true">✓</span>
+      <span class="access-icon" aria-hidden="true">●</span>
       <div>
-        <strong id="accessTitle">Проверяем защищённую ссылку</strong>
-        <span id="accessText">Эта страница доступна только по персональной ссылке из Telegram.</span>
+        <strong id="accessTitle">Подготавливаем рабочее пространство</strong>
+        <span id="accessText">Создайте проект — после этого откроется персональная загрузка файлов.</span>
       </div>
     </div>
 
+    <section class="order-section" id="orderSection" aria-labelledby="orderTitle">
+      <div class="order-copy">
+        <p class="kicker">01 / QUICK START</p>
+        <h2 id="orderTitle">Из исходника<br><span>в готовый Reel</span></h2>
+        <p class="lead">Выберите режим и сразу переходите к загрузке. Остальные настройки уже подобраны — менять их необязательно.</p>
+        <ul class="order-points">
+          <li>До 1 ГБ на один файл</li>
+          <li>Несколько файлов в одной заявке</li>
+          <li>Продолжение после обрыва интернета</li>
+        </ul>
+      </div>
+      <form class="order-form" id="orderForm">
+        <div class="quick-form-heading">
+          <span class="quick-badge">Новый проект</span>
+          <strong>Как обработать видео?</strong>
+          <p>SHORT подготовит один ролик целиком. LONG найдёт несколько сильных моментов.</p>
+        </div>
+        <input id="projectType" name="projectType" type="hidden" value="shorts">
+        <div class="processing-panel">
+          <label class="mode-field">
+            <span>Режим</span>
+            <select id="processingMode" name="processingMode">
+              <option value="short">SHORT — готовый Reel</option>
+              <option value="long">LONG — найти сильные фрагменты</option>
+            </select>
+          </label>
+          <label>
+            <span>Что учесть? <small>необязательно</small></span>
+            <input id="processingRequest" name="processingRequest" maxlength="500" placeholder="Например: без hook и слежения за лицом">
+          </label>
+        </div>
+        <details class="advanced-settings">
+          <summary>Дополнительные настройки</summary>
+          <div class="advanced-content">
+            <div>
+              <p class="advanced-label">Обработка</p>
+              <div class="option-grid" aria-label="Настройки обработки">
+                <label class="option-card"><input id="faceTrackingEnabled" type="checkbox" checked><span><strong>Следить за лицом</strong><small>Умное кадрирование 9:16</small></span></label>
+                <label class="option-card"><input id="subtitlesEnabled" type="checkbox" checked><span><strong>Субтитры</strong><small>Подсветка активного слова</small></span></label>
+                <label class="option-card"><input id="hookEnabled" type="checkbox" checked><span><strong>AI-hook</strong><small>Кликабельный текст сверху</small></span></label>
+              </div>
+            </div>
+            <div class="field-grid optional-contact">
+              <label>
+                <span>Имя <small>необязательно</small></span>
+                <input id="customerName" name="customerName" autocomplete="name" maxlength="80" placeholder="Как к вам обращаться">
+              </label>
+              <label>
+                <span>Контакт для уведомления <small>необязательно</small></span>
+                <input id="customerContact" name="contact" maxlength="120" placeholder="@telegram или email">
+              </label>
+            </div>
+            <label>
+              <span>Комментарий <small>необязательно</small></span>
+              <textarea id="projectComment" name="comment" maxlength="1000" rows="3" placeholder="Стиль, хронометраж или другие пожелания"></textarea>
+            </label>
+          </div>
+        </details>
+        <label class="consent-row">
+          <input id="projectConsent" type="checkbox" required>
+          <span>Я согласен на временное хранение загруженных файлов для выполнения заказа.</span>
+        </label>
+        <button class="primary-button" id="orderSubmit" type="submit">Продолжить к загрузке <span aria-hidden="true">→</span></button>
+        <p class="form-status" id="orderStatus" role="status"></p>
+      </form>
+    </section>
+
     <section class="hero-grid">
       <div class="intro">
-        <p class="kicker">01 / INGEST</p>
-        <h2>Передайте файлы<br><span>без ограничения чата</span></h2>
+        <p class="kicker">02 / UPLOAD</p>
+        <h2>Загрузите исходники<br><span>напрямую в проект</span></h2>
         <p class="lead">Видео, звук, изображения и архивы загружаются частями. Если интернет оборвётся, снова выберите тот же файл — загрузка продолжится.</p>
         <div class="stats">
           <div><strong id="limitValue">—</strong><span>максимальный файл</span></div>
@@ -44,7 +113,7 @@
           <div><strong id="storageValue">LOCAL</strong><span>хранение исходников</span></div>
         </div>
         <div class="trust-row">
-          <span>Защищённая ссылка</span>
+          <span>Изолированная заявка</span>
           <span>Автоудаление через <b id="retentionValue">24 ч</b></span>
         </div>
       </div>
@@ -57,7 +126,7 @@
             <svg viewBox="0 0 64 64"><path d="M32 43V12m0 0L20 24m12-12 12 12M13 39v10a4 4 0 0 0 4 4h30a4 4 0 0 0 4-4V39"/></svg>
           </div>
           <p class="drop-title">Перетащите файлы сюда</p>
-          <p class="drop-subtitle">или нажмите, чтобы выбрать</p>
+          <p class="drop-subtitle">или нажмите, чтобы выбрать · до 1 ГБ каждый</p>
           <span class="format-list">MP4 · MOV · MKV · WAV · MP3 · PNG · JPG · ZIP</span>
         </div>
 
@@ -75,21 +144,21 @@
     <section class="how-section" aria-labelledby="howTitle">
       <div class="section-heading">
         <div>
-          <p class="kicker">02 / HOW IT WORKS</p>
+          <p class="kicker">03 / HOW IT WORKS</p>
           <h2 id="howTitle">Три простых шага</h2>
         </div>
       </div>
       <div class="steps">
-        <article><span>01</span><strong>Выберите файл</strong><p>Можно добавить сразу несколько исходников.</p></article>
-        <article><span>02</span><strong>Дождитесь 100%</strong><p>Не закрывайте вкладку, пока идёт передача.</p></article>
-        <article><span>03</span><strong>Готово</strong><p>Бот сообщит, когда файл будет принят.</p></article>
+        <article><span>01</span><strong>Выберите режим</strong><p>SHORT для готового ролика или LONG для поиска сильных моментов.</p></article>
+        <article><span>02</span><strong>Загрузите файлы</strong><p>Можно добавить несколько исходников и продолжить после обрыва.</p></article>
+        <article><span>03</span><strong>Проверьте результат</strong><p>Получите preview, напишите правки и подтвердите готовую версию.</p></article>
       </div>
     </section>
 
     <section class="queue-section" aria-labelledby="queueTitle">
       <div class="section-heading">
         <div>
-          <p class="kicker">03 / TRANSFER</p>
+          <p class="kicker">04 / TRANSFER</p>
           <h2 id="queueTitle">Очередь загрузки</h2>
         </div>
         <button id="clearFinished" class="ghost-button" type="button">Очистить готовые</button>
@@ -101,15 +170,25 @@
     <section class="files-section" id="filesSection" aria-labelledby="filesTitle">
       <div class="section-heading">
         <div>
-          <p class="kicker">04 / INBOX</p>
+          <p class="kicker">05 / INBOX</p>
           <h2 id="filesTitle">Принятые файлы</h2>
         </div>
         <button id="refreshFiles" class="ghost-button" type="button">Обновить</button>
       </div>
-      <p class="destination" id="destinationPath">X:\AI\montage\inbox</p>
+      <p class="destination" id="destinationPath">Timeweb Cloud S3</p>
       <div id="filesList" class="files-list"></div>
     </section>
-    <footer>Файлы хранятся временно и удаляются автоматически. Не передавайте персональную ссылку другим.</footer>
+    <section class="pipeline-section" id="pipelineSection" aria-labelledby="pipelineTitle" hidden>
+      <div class="section-heading">
+        <div>
+          <p class="kicker">06 / PIPELINE</p>
+          <h2 id="pipelineTitle">Обработка MontageAI</h2>
+        </div>
+        <button id="refreshPipeline" class="ghost-button" type="button">Обновить</button>
+      </div>
+      <div id="pipelineList" class="pipeline-list" aria-live="polite"></div>
+    </section>
+    <footer>Файлы хранятся временно и удаляются автоматически. Каждая заявка изолирована от остальных пользователей.</footer>
   </main>
 
   <template id="uploadTemplate">

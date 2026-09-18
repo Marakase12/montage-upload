@@ -6,9 +6,11 @@ import {
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
   DeleteObjectsCommand,
+  GetObjectCommand,
   ListObjectsV2Command,
   ListMultipartUploadsCommand,
   ListPartsCommand,
+  PutObjectCommand,
   PutBucketCorsCommand,
   S3Client,
   UploadPartCommand,
@@ -16,11 +18,16 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import express from 'express';
 
-const DEFAULT_MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024;
+const DEFAULT_MAX_FILE_SIZE = 1024 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE = 10 * 1024 * 1024;
 const DEFAULT_DIRECT_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_LINK_LIFETIME_HOURS = 24;
 const DEFAULT_RETENTION_HOURS = 24;
+const PROCESSABLE_VIDEO_EXTENSIONS = new Set(['.mp4']);
+const PIPELINE_STATES = new Set([
+  'QUEUED', 'PROCESSING', 'READY_FOR_REVIEW', 'LONG_CANDIDATES_READY', 'APPROVED', 'FAILED',
+]);
+const ACTION_STATES = new Set(['PENDING', 'PROCESSING', 'COMPLETE', 'FAILED']);
 const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(CURRENT_DIR, '../public');
 const ALLOWED_EXTENSIONS = new Set([
@@ -107,6 +114,88 @@ function allowedOrigins(env) {
     .split(',')
     .map((value) => value.trim().replace(/\/$/, ''))
     .filter(Boolean);
+}
+
+function processingOptions(value = {}) {
+  const input = value && typeof value === 'object' ? value : {};
+  return {
+    mode: input.mode === 'long' ? 'long' : 'short',
+    faceTrackingEnabled: input.faceTrackingEnabled !== false,
+    subtitlesEnabled: input.subtitlesEnabled !== false,
+    hookEnabled: input.hookEnabled !== false,
+    musicEnabled: input.musicEnabled !== false,
+    requestText: shortText(input.requestText, 500),
+  };
+}
+
+function workerAuthorized(request, env) {
+  const expected = String(env.WORKER_SECRET ?? '');
+  const supplied = String(request.headers['x-worker-secret'] ?? '');
+  if (!expected || !supplied) return false;
+  const expectedBytes = Buffer.from(expected);
+  const suppliedBytes = Buffer.from(supplied);
+  return expectedBytes.length === suppliedBytes.length
+    && crypto.timingSafeEqual(expectedBytes, suppliedBytes);
+}
+
+function requireWorker(request, env) {
+  if (!workerAuthorized(request, env)) throw new HttpError(401, 'Доступ локальной машины запрещён');
+}
+
+function safeIdentifier(value, label) {
+  const result = String(value ?? '');
+  if (!/^[A-Za-z0-9_-]{8,100}$/.test(result)) throw new HttpError(400, `Некорректный ${label}`);
+  return result;
+}
+
+function queueKey(jobId, taskId) {
+  return `.queue/${safeIdentifier(jobId, 'jobId')}/${safeIdentifier(taskId, 'taskId')}.json`;
+}
+
+function statusKey(jobId, taskId) {
+  return `.status/${safeIdentifier(jobId, 'jobId')}/${safeIdentifier(taskId, 'taskId')}.json`;
+}
+
+function actionKey(jobId, actionId) {
+  return `.actions/${safeIdentifier(jobId, 'jobId')}/${safeIdentifier(actionId, 'actionId')}.json`;
+}
+
+function actionIsAvailable(action) {
+  if (action?.state === 'PENDING') return true;
+  const updatedAt = Date.parse(String(action?.updatedAt ?? ''));
+  return action?.state === 'PROCESSING'
+    && (!Number.isFinite(updatedAt) || Date.now() - updatedAt > 2 * 60 * 60 * 1000);
+}
+
+async function objectJson(s3, bucket, key) {
+  const object = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const text = await object.Body.transformToString('utf-8');
+  return JSON.parse(text);
+}
+
+async function listPrefix(s3, bucket, prefix) {
+  const objects = [];
+  let continuationToken;
+  do {
+    const page = await s3.send(new ListObjectsV2Command({
+      Bucket: bucket,
+      Prefix: prefix,
+      ContinuationToken: continuationToken,
+      MaxKeys: 1000,
+    }));
+    objects.push(...(page.Contents ?? []).filter((object) => object.Key));
+    continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+  } while (continuationToken);
+  return objects;
+}
+
+async function putJson(s3, bucket, key, payload) {
+  await s3.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: JSON.stringify(payload, null, 2),
+    ContentType: 'application/json; charset=utf-8',
+  }));
 }
 
 function createS3(env) {
@@ -242,6 +331,29 @@ export function createTelegramUploadAccess(message, env, now = Math.floor(Date.n
   return { job, token, uploadUrl: uploadUrl.toString(), lifetimeHours };
 }
 
+export function createWebUploadAccess(env, now = Math.floor(Date.now() / 1000), processing = {}) {
+  const lifetimeHours = integer(env.UPLOAD_LINK_LIFETIME_HOURS, DEFAULT_LINK_LIFETIME_HOURS);
+  const job = {
+    kind: 'job',
+    jobId: `web-${crypto.randomUUID()}`,
+    userId: `web-${crypto.randomUUID()}`,
+    source: 'web',
+    processing: processingOptions(processing),
+    iat: now,
+    exp: now + lifetimeHours * 60 * 60,
+  };
+  return {
+    job,
+    token: signToken(job, env.TOKEN_SECRET),
+    lifetimeHours,
+    expiresAt: new Date(job.exp * 1000).toISOString(),
+  };
+}
+
+function shortText(value, maxLength) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, maxLength);
+}
+
 async function sendUploadButton(env, message, lead) {
   const access = createTelegramUploadAccess(message, env);
   await sendTelegram(env, 'sendMessage', {
@@ -261,6 +373,7 @@ export function createApp(options = {}) {
   const signUrl = options.getSignedUrl ?? getSignedUrl;
   const bucket = env.S3_BUCKET;
   const app = express();
+  const jobRequests = new Map();
 
   app.disable('x-powered-by');
   app.set('trust proxy', true);
@@ -307,6 +420,55 @@ export function createApp(options = {}) {
     return { job, session };
   };
 
+  app.post('/api/jobs', asyncRoute(async (request, response) => {
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const input = request.body ?? {};
+    const customerName = shortText(input.customerName, 80);
+    const contact = shortText(input.contact, 120);
+    const projectType = shortText(input.projectType, 40) || 'other';
+    const comment = shortText(input.comment, 1000);
+    const quickStart = input.quickStart === true;
+    if (!quickStart && customerName.length < 2) throw new HttpError(400, 'Укажите ваше имя');
+    if (!quickStart && contact.length < 3) throw new HttpError(400, 'Укажите Telegram, email или другой контакт');
+
+    const now = Date.now();
+    const requester = request.ip || request.socket.remoteAddress || 'unknown';
+    const recent = (jobRequests.get(requester) ?? []).filter((time) => now - time < 60 * 60 * 1000);
+    if (recent.length >= 10) throw new HttpError(429, 'Слишком много заявок. Попробуйте через час');
+    recent.push(now);
+    jobRequests.set(requester, recent);
+
+    const processing = processingOptions(input.processing);
+    const access = createWebUploadAccess(env, Math.floor(now / 1000), processing);
+    const brief = {
+      version: 1,
+      jobId: access.job.jobId,
+      source: 'website',
+      customerName: customerName || null,
+      contact: contact || null,
+      projectType,
+      comment,
+      processing,
+      quickStart,
+      createdAt: new Date(now).toISOString(),
+      expiresAt: access.expiresAt,
+    };
+    await s3.send(new PutObjectCommand({
+      Bucket: bucket,
+      Key: `.briefs/${access.job.jobId}.json`,
+      Body: JSON.stringify(brief, null, 2),
+      ContentType: 'application/json; charset=utf-8',
+      Metadata: { jobid: access.job.jobId, source: 'website' },
+    }));
+    response.status(201).json({
+      ok: true,
+      token: access.token,
+      jobId: access.job.jobId,
+      lifetimeHours: access.lifetimeHours,
+      expiresAt: access.expiresAt,
+    });
+  }));
+
   app.get('/api/health', (request, response) => {
     response.json({
       ok: true,
@@ -316,6 +478,17 @@ export function createApp(options = {}) {
       maxFileSize: integer(env.MAX_FILE_SIZE_BYTES, DEFAULT_MAX_FILE_SIZE),
       chunkSize: Math.max(integer(env.CHUNK_SIZE_BYTES, DEFAULT_CHUNK_SIZE), 5 * 1024 * 1024),
       retentionHours: integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS),
+    });
+  });
+
+  app.get('/api/session', (request, response) => {
+    const job = jobFromRequest(request);
+    response.json({
+      ok: true,
+      jobId: job.jobId,
+      source: job.source || 'telegram',
+      processing: processingOptions(job.processing),
+      expiresAt: new Date(job.exp * 1000).toISOString(),
     });
   });
 
@@ -377,6 +550,7 @@ export function createApp(options = {}) {
       type,
       lastModified,
       chunkSize,
+      processing: processingOptions(job.processing),
       exp: job.exp,
     };
 
@@ -428,6 +602,36 @@ export function createApp(options = {}) {
       MultipartUpload: { Parts: parts },
     }));
 
+    const extension = path.extname(session.name).toLowerCase();
+    let pipelineTask = null;
+    if (PROCESSABLE_VIDEO_EXTENSIONS.has(extension)) {
+      pipelineTask = {
+        version: 1,
+        taskId: session.sessionId,
+        jobId: job.jobId,
+        source: job.source || 'telegram',
+        chatId: job.chatId || null,
+        userId: job.userId || null,
+        objectKey: session.key,
+        fileName: session.name,
+        size: session.size,
+        type: session.type,
+        processing: processingOptions(session.processing || job.processing),
+        createdAt: new Date().toISOString(),
+      };
+      await putJson(s3, bucket, queueKey(job.jobId, session.sessionId), pipelineTask);
+      await putJson(s3, bucket, statusKey(job.jobId, session.sessionId), {
+        version: 1,
+        jobId: job.jobId,
+        taskId: session.sessionId,
+        state: 'QUEUED',
+        percent: 0,
+        stage: 'cloud_queue',
+        detail: 'Видео загружено и ожидает локальную машину',
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
     if (job.chatId && env.TELEGRAM_BOT_TOKEN) {
       await sendTelegram(env, 'sendMessage', {
         chat_id: job.chatId,
@@ -446,7 +650,228 @@ export function createApp(options = {}) {
       size: session.size,
       status: 'completed',
       etag: completed.ETag,
+      pipelineQueued: Boolean(pipelineTask),
     });
+  }));
+
+  app.get('/api/pipeline', asyncRoute(async (request, response) => {
+    const job = jobFromRequest(request);
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const objects = await listPrefix(s3, bucket, `.status/${job.jobId}/`);
+    const actionObjects = await listPrefix(s3, bucket, `.actions/${job.jobId}/`);
+    const actions = [];
+    for (const object of actionObjects) {
+      const action = await objectJson(s3, bucket, object.Key);
+      if (action.jobId === job.jobId) actions.push(action);
+    }
+    const tasks = [];
+    for (const object of objects) {
+      const status = await objectJson(s3, bucket, object.Key);
+      if (status.jobId !== job.jobId) continue;
+      if (status.resultKey && ['READY_FOR_REVIEW', 'APPROVED'].includes(status.state)) {
+        status.previewUrl = await signUrl(
+          s3,
+          new GetObjectCommand({ Bucket: bucket, Key: status.resultKey }),
+          { expiresIn: 15 * 60 },
+        );
+      }
+      status.action = actions
+        .filter((action) => action.taskId === status.taskId)
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] ?? null;
+      tasks.push(status);
+    }
+    tasks.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    response.json({ ok: true, tasks });
+  }));
+
+  app.post('/api/pipeline/:taskId/actions', asyncRoute(async (request, response) => {
+    const job = jobFromRequest(request);
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const taskId = safeIdentifier(request.params.taskId, 'taskId');
+    const status = await objectJson(s3, bucket, statusKey(job.jobId, taskId));
+    if (status.jobId !== job.jobId || status.taskId !== taskId) {
+      throw new HttpError(409, 'Ролик не принадлежит этой заявке');
+    }
+    const kind = String(request.body?.kind ?? '').toUpperCase();
+    if (!['REVISION', 'APPROVE'].includes(kind)) throw new HttpError(400, 'Неизвестное действие');
+    if (kind === 'REVISION' && !['READY_FOR_REVIEW', 'APPROVED'].includes(status.state)) {
+      throw new HttpError(409, 'Ролик пока не готов к правкам');
+    }
+    if (kind === 'APPROVE' && status.state !== 'READY_FOR_REVIEW') {
+      throw new HttpError(409, 'Подтвердить можно только готовый preview');
+    }
+    if (kind === 'APPROVE' && request.body?.confirmation !== 'APPROVE') {
+      throw new HttpError(400, 'Нужно явно подтвердить выбранный preview');
+    }
+    const existingObjects = await listPrefix(s3, bucket, `.actions/${job.jobId}/`);
+    for (const object of existingObjects) {
+      const existing = await objectJson(s3, bucket, object.Key);
+      if (existing.taskId === taskId && actionIsAvailable(existing)) {
+        throw new HttpError(409, 'Предыдущее действие ещё выполняется');
+      }
+    }
+    const requestText = shortText(request.body?.requestText, 500);
+    if (kind === 'REVISION' && requestText.length < 2) {
+      throw new HttpError(400, 'Опиши, что изменить в ролике');
+    }
+    const actionId = crypto.randomUUID();
+    const action = {
+      version: 1,
+      actionId,
+      jobId: job.jobId,
+      taskId,
+      localJobId: status.localJobId,
+      resultKey: status.resultKey || null,
+      kind,
+      previousState: status.state,
+      requestText: kind === 'APPROVE' ? 'Всё хорошо, подтверждаю этот preview' : requestText,
+      state: 'PENDING',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    if (!action.localJobId) throw new HttpError(409, 'Локальный job ещё не привязан');
+    await putJson(s3, bucket, actionKey(job.jobId, actionId), action);
+    response.status(202).json({ ok: true, action });
+  }));
+
+  app.get('/api/worker/tasks', asyncRoute(async (request, response) => {
+    requireWorker(request, env);
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const objects = await listPrefix(s3, bucket, '.queue/');
+    const tasks = [];
+    for (const object of objects) {
+      const task = await objectJson(s3, bucket, object.Key);
+      let status = null;
+      try {
+        status = await objectJson(s3, bucket, statusKey(task.jobId, task.taskId));
+      } catch (error) {
+        if (error?.name !== 'NoSuchKey') throw error;
+      }
+      const updatedAt = Date.parse(String(status?.updatedAt ?? ''));
+      const processingIsStale = status?.state === 'PROCESSING'
+        && (!Number.isFinite(updatedAt) || Date.now() - updatedAt > 2 * 60 * 60 * 1000);
+      if (!status || status.state === 'QUEUED' || processingIsStale) tasks.push(task);
+    }
+    response.json({ ok: true, tasks: tasks.slice(0, 20) });
+  }));
+
+  app.get('/api/worker/actions', asyncRoute(async (request, response) => {
+    requireWorker(request, env);
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const objects = await listPrefix(s3, bucket, '.actions/');
+    const actions = [];
+    for (const object of objects) {
+      const action = await objectJson(s3, bucket, object.Key);
+      if (actionIsAvailable(action)) actions.push(action);
+    }
+    actions.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    response.json({ ok: true, actions: actions.slice(0, 20) });
+  }));
+
+  app.post('/api/worker/actions/:actionId/claim', asyncRoute(async (request, response) => {
+    requireWorker(request, env);
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const actionId = safeIdentifier(request.params.actionId, 'actionId');
+    const jobId = safeIdentifier(request.body?.jobId, 'jobId');
+    const action = await objectJson(s3, bucket, actionKey(jobId, actionId));
+    if (action.actionId !== actionId || action.jobId !== jobId || !actionIsAvailable(action)) {
+      throw new HttpError(409, 'Действие уже выполняется или завершено');
+    }
+    action.state = 'PROCESSING';
+    action.updatedAt = new Date().toISOString();
+    await putJson(s3, bucket, actionKey(jobId, actionId), action);
+    response.json({ ok: true, action });
+  }));
+
+  app.post('/api/worker/actions/:actionId/complete', asyncRoute(async (request, response) => {
+    requireWorker(request, env);
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const actionId = safeIdentifier(request.params.actionId, 'actionId');
+    const jobId = safeIdentifier(request.body?.jobId, 'jobId');
+    const action = await objectJson(s3, bucket, actionKey(jobId, actionId));
+    const state = String(request.body?.state ?? '').toUpperCase();
+    if (!ACTION_STATES.has(state) || !['COMPLETE', 'FAILED'].includes(state)) {
+      throw new HttpError(400, 'Некорректный результат действия');
+    }
+    action.state = state;
+    action.detail = shortText(request.body?.detail, 300);
+    action.updatedAt = new Date().toISOString();
+    action.completedAt = new Date().toISOString();
+    await putJson(s3, bucket, actionKey(jobId, actionId), action);
+    response.json({ ok: true, action });
+  }));
+
+  app.post('/api/worker/tasks/:taskId/claim', asyncRoute(async (request, response) => {
+    requireWorker(request, env);
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const taskId = safeIdentifier(request.params.taskId, 'taskId');
+    const jobId = safeIdentifier(request.body?.jobId, 'jobId');
+    const task = await objectJson(s3, bucket, queueKey(jobId, taskId));
+    if (task.taskId !== taskId || task.jobId !== jobId) throw new HttpError(409, 'Задача не совпадает');
+    await putJson(s3, bucket, statusKey(jobId, taskId), {
+      version: 1,
+      jobId,
+      taskId,
+      state: 'PROCESSING',
+      percent: 1,
+      stage: 'download',
+      detail: 'Локальная машина забирает исходник',
+      updatedAt: new Date().toISOString(),
+    });
+    const downloadUrl = await signUrl(
+      s3,
+      new GetObjectCommand({ Bucket: bucket, Key: task.objectKey }),
+      { expiresIn: 60 * 60 },
+    );
+    response.json({ ok: true, task, downloadUrl });
+  }));
+
+  app.post('/api/worker/tasks/:taskId/status', asyncRoute(async (request, response) => {
+    requireWorker(request, env);
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const taskId = safeIdentifier(request.params.taskId, 'taskId');
+    const jobId = safeIdentifier(request.body?.jobId, 'jobId');
+    const state = String(request.body?.state ?? 'PROCESSING').toUpperCase();
+    if (!PIPELINE_STATES.has(state)) throw new HttpError(400, 'Некорректное состояние pipeline');
+    const percent = Math.max(0, Math.min(100, Number(request.body?.percent) || 0));
+    const status = {
+      version: 1,
+      jobId,
+      taskId,
+      state,
+      percent,
+      stage: shortText(request.body?.stage, 80) || 'processing',
+      detail: shortText(request.body?.detail, 300) || 'Обработка',
+      localJobId: shortText(request.body?.localJobId, 100) || null,
+      resultKey: shortText(request.body?.resultKey, 500) || null,
+      updatedAt: new Date().toISOString(),
+    };
+    if (Array.isArray(request.body?.candidates)) {
+      status.candidates = request.body.candidates.slice(0, 12).map((candidate) => ({
+        candidateId: Number(candidate?.candidate_id) || null,
+        title: shortText(candidate?.title, 120),
+        sourceStart: Number(candidate?.source_start) || 0,
+        sourceEnd: Number(candidate?.source_end) || 0,
+        score: Number(candidate?.score) || null,
+        reason: shortText(candidate?.selection_reason || candidate?.reason, 300),
+      }));
+    }
+    await putJson(s3, bucket, statusKey(jobId, taskId), status);
+    response.json({ ok: true, status });
+  }));
+
+  app.post('/api/worker/tasks/:taskId/result-upload', asyncRoute(async (request, response) => {
+    requireWorker(request, env);
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const taskId = safeIdentifier(request.params.taskId, 'taskId');
+    const jobId = safeIdentifier(request.body?.jobId, 'jobId');
+    const resultKey = `.results/${jobId}/${taskId}.mp4`;
+    const uploadUrl = await signUrl(
+      s3,
+      new PutObjectCommand({ Bucket: bucket, Key: resultKey, ContentType: 'video/mp4' }),
+      { expiresIn: 60 * 60 },
+    );
+    response.json({ ok: true, resultKey, uploadUrl });
   }));
 
   app.delete('/api/uploads/:uploadId', asyncRoute(async (request, response) => {

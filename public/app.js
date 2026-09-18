@@ -20,6 +20,22 @@ const tokenToggle = document.querySelector('#tokenToggle');
 const tokenBox = document.querySelector('#tokenBox');
 const tokenInput = document.querySelector('#tokenInput');
 const saveToken = document.querySelector('#saveToken');
+const orderSection = document.querySelector('#orderSection');
+const orderForm = document.querySelector('#orderForm');
+const orderSubmit = document.querySelector('#orderSubmit');
+const orderStatus = document.querySelector('#orderStatus');
+const customerName = document.querySelector('#customerName');
+const customerContact = document.querySelector('#customerContact');
+const projectType = document.querySelector('#projectType');
+const projectComment = document.querySelector('#projectComment');
+const processingMode = document.querySelector('#processingMode');
+const processingRequest = document.querySelector('#processingRequest');
+const faceTrackingEnabled = document.querySelector('#faceTrackingEnabled');
+const subtitlesEnabled = document.querySelector('#subtitlesEnabled');
+const hookEnabled = document.querySelector('#hookEnabled');
+const pipelineSection = document.querySelector('#pipelineSection');
+const pipelineList = document.querySelector('#pipelineList');
+const refreshPipeline = document.querySelector('#refreshPipeline');
 
 const tasks = new Set();
 const config = window.MONTAGE_UPLOAD_CONFIG ?? {};
@@ -33,6 +49,7 @@ let uploadToken = linkToken
   || localStorage.getItem('montage-upload-token')
   || '';
 let serverProtected = false;
+let maxFileSize = 1024 * 1024 * 1024;
 if (linkToken) {
   sessionStorage.setItem('montage-upload-link-token', linkToken);
   url.searchParams.delete('token');
@@ -44,11 +61,11 @@ tokenToggle.hidden = !manualTokenEnabled;
 function setAccessState(state) {
   accessBanner.dataset.state = state;
   if (state === 'ready') {
-    accessTitle.textContent = 'Защищённая ссылка активна';
-    accessText.textContent = 'Файлы будут доступны только исполнителю заказа.';
+    accessTitle.textContent = 'Проект готов к загрузке';
+    accessText.textContent = 'Можно загружать файлы. Другие пользователи их не увидят.';
   } else if (state === 'locked') {
-    accessTitle.textContent = 'Нужна персональная ссылка';
-    accessText.textContent = 'Вернитесь в Telegram и нажмите кнопку «Загрузить большой файл».';
+    accessTitle.textContent = 'Начните новый проект';
+    accessText.textContent = 'Выберите режим ниже — загрузка откроется сразу.';
   }
 }
 
@@ -251,6 +268,7 @@ async function uploadFile(task) {
     task.speed.textContent = formatBytes(task.file.size);
     setCardState(task, 'complete', `Готово · ${result.name}`);
     await loadFiles();
+    await loadPipeline();
   } catch (error) {
     if (error.name === 'AbortError' || task.cancelled) {
       setCardState(task, 'cancelled', 'Загрузка отменена');
@@ -315,7 +333,22 @@ function createTask(file) {
 }
 
 function addFiles(fileList) {
-  [...fileList].forEach(createTask);
+  [...fileList].forEach((file) => {
+    if (file.size > maxFileSize) {
+      const card = template.content.firstElementChild.cloneNode(true);
+      card.classList.add('error');
+      card.querySelector('.file-badge').textContent = fileKind(file.name);
+      card.querySelector('.file-name').textContent = file.name;
+      card.querySelector('.file-meta').textContent = formatBytes(file.size);
+      card.querySelector('.file-status').textContent = `Файл больше лимита ${formatBytes(maxFileSize)}`;
+      card.querySelector('.file-percent').textContent = '—';
+      card.querySelector('.cancel-button').addEventListener('click', () => card.remove());
+      uploadList.append(card);
+      emptyQueue.hidden = true;
+      return;
+    }
+    createTask(file);
+  });
   fileInput.value = '';
 }
 
@@ -326,22 +359,38 @@ async function checkHealth() {
     serverState.className = 'server-state online';
     serverState.querySelector('span:last-child').textContent = 'Сервер готов';
     limitValue.textContent = formatBytes(health.maxFileSize);
+    maxFileSize = health.maxFileSize;
     chunkValue.textContent = formatBytes(health.chunkSize);
     storageValue.textContent = health.cloud ? 'CLOUD' : 'LOCAL';
     retentionValue.textContent = `${health.retentionHours ?? 24} ч`;
-    if (serverProtected && !uploadToken) {
+    let tokenReady = !serverProtected;
+    if (serverProtected && uploadToken) {
+      try {
+        await api('/api/session');
+        tokenReady = true;
+      } catch {
+        uploadToken = '';
+        tokenInput.value = '';
+        sessionStorage.removeItem('montage-upload-link-token');
+        localStorage.removeItem('montage-upload-token');
+      }
+    }
+    if (!tokenReady) {
       setAccessState('locked');
       fileInput.disabled = true;
       dropzone.classList.add('locked');
       dropzone.setAttribute('aria-disabled', 'true');
       if (manualTokenEnabled) tokenBox.hidden = false;
       filesSection.hidden = true;
+      orderSection.hidden = false;
     } else {
       setAccessState('ready');
       fileInput.disabled = false;
       dropzone.classList.remove('locked');
       dropzone.removeAttribute('aria-disabled');
       filesSection.hidden = false;
+      orderSection.hidden = true;
+      pipelineSection.hidden = false;
     }
   } catch (error) {
     serverState.className = 'server-state offline';
@@ -373,6 +422,170 @@ async function loadFiles() {
     });
   } catch (error) {
     filesList.textContent = error.message;
+  }
+}
+
+function pipelineStateLabel(state) {
+  return {
+    QUEUED: 'Ожидает локальную машину',
+    PROCESSING: 'Обрабатывается',
+    READY_FOR_REVIEW: 'Готов к проверке',
+    LONG_CANDIDATES_READY: 'Кандидаты LONG готовы',
+    APPROVED: 'Подтверждён',
+    FAILED: 'Ошибка обработки',
+  }[state] ?? state;
+}
+
+async function sendPipelineAction(task, payload, statusNode, controls) {
+  controls.forEach((control) => { control.disabled = true; });
+  statusNode.className = 'review-status';
+  statusNode.textContent = 'Передаю действие локальной машине…';
+  try {
+    await api(`/api/pipeline/${encodeURIComponent(task.taskId)}/actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    statusNode.className = 'review-status success';
+    statusNode.textContent = payload.kind === 'APPROVE'
+      ? 'Подтверждение принято. Проверяю и фиксирую final.mp4…'
+      : 'Правка принята. Новый preview появится здесь автоматически.';
+    await loadPipeline();
+  } catch (error) {
+    statusNode.className = 'review-status error';
+    statusNode.textContent = error.message;
+    controls.forEach((control) => { control.disabled = false; });
+  }
+}
+
+function appendReviewControls(card, task) {
+  if (!['READY_FOR_REVIEW', 'APPROVED'].includes(task.state)) return;
+  const actionBusy = ['PENDING', 'PROCESSING'].includes(task.action?.state);
+  const panel = document.createElement('div');
+  panel.className = 'review-actions';
+  const heading = document.createElement('strong');
+  heading.textContent = 'Управление роликом';
+  const textarea = document.createElement('textarea');
+  textarea.maxLength = 500;
+  textarea.rows = 3;
+  textarea.placeholder = 'Например: сделай музыку тише, текст ниже и переделай хук';
+  textarea.disabled = actionBusy;
+  const buttons = document.createElement('div');
+  buttons.className = 'review-buttons';
+  const revise = document.createElement('button');
+  revise.type = 'button';
+  revise.className = 'secondary-button';
+  revise.textContent = 'Применить правку';
+  revise.disabled = actionBusy;
+  const approve = document.createElement('button');
+  approve.type = 'button';
+  approve.className = 'approve-button';
+  approve.textContent = 'Всё хорошо — подтвердить';
+  approve.disabled = actionBusy || task.state === 'APPROVED';
+  const status = document.createElement('p');
+  status.className = 'review-status';
+  if (actionBusy) {
+    status.textContent = task.action.kind === 'APPROVE'
+      ? '⏳ Фиксирую подтверждённый preview'
+      : '⏳ Локальная машина применяет правку';
+  } else if (task.action?.state === 'FAILED') {
+    status.className = 'review-status error';
+    status.textContent = task.action.detail || 'Последнее действие не выполнено';
+  } else if (task.state === 'APPROVED') {
+    status.className = 'review-status success';
+    status.textContent = '✅ Final зафиксирован. Публикация не запускалась.';
+  }
+  revise.addEventListener('click', () => {
+    const requestText = textarea.value.trim();
+    if (!requestText) {
+      status.className = 'review-status error';
+      status.textContent = 'Сначала напиши, что изменить.';
+      return;
+    }
+    sendPipelineAction(task, { kind: 'REVISION', requestText }, status, [textarea, revise, approve]);
+  });
+  approve.addEventListener('click', () => {
+    const confirmed = window.confirm(
+      'Подтвердить именно этот preview? Будет создан final.mp4. Публикация не запускается.',
+    );
+    if (!confirmed) return;
+    sendPipelineAction(
+      task,
+      { kind: 'APPROVE', confirmation: 'APPROVE' },
+      status,
+      [textarea, revise, approve],
+    );
+  });
+  buttons.append(revise, approve);
+  panel.append(heading, textarea, buttons, status);
+  card.append(panel);
+}
+
+async function loadPipeline() {
+  if (!uploadToken) return;
+  try {
+    const result = await api('/api/pipeline');
+    pipelineList.replaceChildren();
+    if (!result.tasks.length) {
+      const empty = document.createElement('p');
+      empty.className = 'files-empty';
+      empty.textContent = 'После загрузки видео здесь появятся стадии обработки.';
+      pipelineList.append(empty);
+      return;
+    }
+    result.tasks.forEach((task) => {
+      const card = document.createElement('article');
+      card.className = `pipeline-card state-${String(task.state).toLowerCase()}`;
+      const header = document.createElement('div');
+      header.className = 'pipeline-card-header';
+      const title = document.createElement('strong');
+      title.textContent = pipelineStateLabel(task.state);
+      const percent = document.createElement('span');
+      percent.textContent = `${Math.round(Number(task.percent) || 0)}%`;
+      header.append(title, percent);
+      const detail = document.createElement('p');
+      detail.textContent = task.detail || 'Ожидаем обновление';
+      const track = document.createElement('div');
+      track.className = 'progress-track';
+      const value = document.createElement('div');
+      value.className = 'progress-value';
+      value.style.width = `${Math.max(0, Math.min(100, Number(task.percent) || 0))}%`;
+      track.append(value);
+      const meta = document.createElement('small');
+      meta.textContent = task.updatedAt
+        ? `Обновлено ${new Date(task.updatedAt).toLocaleString('ru-RU')}`
+        : '';
+      card.append(header, detail, track, meta);
+      if (Array.isArray(task.candidates) && task.candidates.length) {
+        const candidates = document.createElement('div');
+        candidates.className = 'candidate-list';
+        task.candidates.forEach((candidate) => {
+          const item = document.createElement('div');
+          const heading = document.createElement('strong');
+          const start = Number(candidate.sourceStart || 0).toFixed(1);
+          const end = Number(candidate.sourceEnd || 0).toFixed(1);
+          heading.textContent = `${candidate.candidateId || '—'}. ${candidate.title || 'Фрагмент'}`;
+          const description = document.createElement('span');
+          description.textContent = `${start}–${end} сек. · ${candidate.score || '—'}/100${candidate.reason ? ` · ${candidate.reason}` : ''}`;
+          item.append(heading, description);
+          candidates.append(item);
+        });
+        card.append(candidates);
+      }
+      if (task.previewUrl) {
+        const preview = document.createElement('a');
+        preview.className = 'preview-button';
+        preview.href = task.previewUrl;
+        preview.target = '_blank';
+        preview.rel = 'noopener';
+        preview.textContent = 'Открыть готовый preview';
+        card.append(preview);
+      }
+      appendReviewControls(card, task);
+      pipelineList.append(card);
+    });
+  } catch (error) {
+    pipelineList.textContent = error.message;
   }
 }
 
@@ -410,6 +623,46 @@ clearFinished.addEventListener('click', () => {
 });
 
 refreshFiles.addEventListener('click', loadFiles);
+refreshPipeline.addEventListener('click', loadPipeline);
+orderForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  orderSubmit.disabled = true;
+  orderStatus.className = 'form-status';
+  orderStatus.textContent = 'Создаём защищённый проект…';
+  try {
+    const result = await api('/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        quickStart: true,
+        customerName: customerName.value,
+        contact: customerContact.value,
+        projectType: projectType.value,
+        comment: projectComment.value,
+        processing: {
+          mode: processingMode.value,
+          faceTrackingEnabled: faceTrackingEnabled.checked,
+          subtitlesEnabled: subtitlesEnabled.checked,
+          hookEnabled: hookEnabled.checked,
+          requestText: processingRequest.value,
+        },
+      }),
+    });
+    uploadToken = result.token;
+    sessionStorage.setItem('montage-upload-link-token', uploadToken);
+    orderStatus.className = 'form-status success';
+    orderStatus.textContent = 'Проект создан. Открываем загрузку…';
+    await checkHealth();
+    await loadFiles();
+    await loadPipeline();
+    dropzone.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch (error) {
+    orderStatus.className = 'form-status error';
+    orderStatus.textContent = error.message;
+  } finally {
+    orderSubmit.disabled = false;
+  }
+});
 tokenToggle.addEventListener('click', () => { tokenBox.hidden = !tokenBox.hidden; });
 saveToken.addEventListener('click', async () => {
   uploadToken = tokenInput.value.trim();
@@ -424,6 +677,10 @@ async function initialize() {
   updateEmptyState();
   await checkHealth();
   if (!serverProtected || uploadToken) await loadFiles();
+  if (!serverProtected || uploadToken) await loadPipeline();
 }
 
 initialize();
+setInterval(() => {
+  if (uploadToken && !document.hidden) loadPipeline();
+}, 5000);
