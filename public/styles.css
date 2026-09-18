@@ -124,6 +124,8 @@ h2 span {
 .server-state.online .state-dot { background: var(--mint); }
 .server-state.offline { color: var(--danger); }
 .server-state.offline .state-dot { background: var(--danger); }
+.server-state.preview { color: var(--cyan); }
+.server-state.preview .state-dot { background: var(--cyan); }
 
 .access-banner {
   display: flex;

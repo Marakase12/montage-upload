@@ -49,6 +49,7 @@ let uploadToken = linkToken
   || localStorage.getItem('montage-upload-token')
   || '';
 let serverProtected = false;
+let apiAvailable = false;
 let maxFileSize = 1024 * 1024 * 1024;
 if (linkToken) {
   sessionStorage.setItem('montage-upload-link-token', linkToken);
@@ -355,6 +356,7 @@ function addFiles(fileList) {
 async function checkHealth() {
   try {
     const health = await api('/api/health');
+    apiAvailable = true;
     serverProtected = health.protected;
     serverState.className = 'server-state online';
     serverState.querySelector('span:last-child').textContent = 'Сервер готов';
@@ -393,6 +395,24 @@ async function checkHealth() {
       pipelineSection.hidden = false;
     }
   } catch (error) {
+    apiAvailable = false;
+    const staticDemo = window.location.hostname.endsWith('.github.io');
+    if (staticDemo) {
+      serverState.className = 'server-state preview';
+      serverState.querySelector('span:last-child').textContent = 'Демо интерфейса';
+      accessTitle.textContent = 'Публичное демо MontageAI';
+      accessText.textContent = 'Дизайн доступен для просмотра. Облачная обработка подключается отдельно.';
+      orderSubmit.disabled = true;
+      orderSubmit.textContent = 'Обработка скоро будет доступна';
+      orderStatus.className = 'form-status';
+      orderStatus.textContent = 'Для запуска видео нужен адрес Timeweb backend.';
+      fileInput.disabled = true;
+      dropzone.classList.add('locked');
+      dropzone.setAttribute('aria-disabled', 'true');
+      filesSection.hidden = true;
+      pipelineSection.hidden = true;
+      return;
+    }
     serverState.className = 'server-state offline';
     serverState.querySelector('span:last-child').textContent = error.message;
   }
@@ -676,8 +696,8 @@ saveToken.addEventListener('click', async () => {
 async function initialize() {
   updateEmptyState();
   await checkHealth();
-  if (!serverProtected || uploadToken) await loadFiles();
-  if (!serverProtected || uploadToken) await loadPipeline();
+  if (apiAvailable && (!serverProtected || uploadToken)) await loadFiles();
+  if (apiAvailable && (!serverProtected || uploadToken)) await loadPipeline();
 }
 
 initialize();
