@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+worker-dist/
+server.log
+server-error.log
+.dev.vars
+.env
+*.local

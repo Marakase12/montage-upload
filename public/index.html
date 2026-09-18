@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Montage Drop — загрузка исходников</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="ambient ambient-left"></div>
+  <div class="ambient ambient-right"></div>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <p class="eyebrow">MONTAGE PIPELINE</p>
+          <h1>Загрузка исходников</h1>
+        </div>
+      </div>
+      <div class="server-state" id="serverState">
+        <span class="state-dot"></span>
+        <span>Проверяем сервер</span>
+      </div>
+    </header>
+
+    <section class="hero-grid">
+      <div class="intro">
+        <p class="kicker">01 / INGEST</p>
+        <h2>Передайте файлы<br><span>без ограничения чата</span></h2>
+        <p class="lead">Видео, звук, изображения и архивы загружаются частями. Если соединение оборвётся, повторный выбор того же файла продолжит загрузку.</p>
+        <div class="stats">
+          <div><strong id="limitValue">—</strong><span>максимальный файл</span></div>
+          <div><strong id="chunkValue">—</strong><span>размер части</span></div>
+          <div><strong>LOCAL</strong><span>хранение исходников</span></div>
+        </div>
+      </div>
+
+      <div class="drop-panel">
+        <div class="scanline" aria-hidden="true"></div>
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Выбрать файлы">
+          <input id="fileInput" type="file" multiple hidden accept="video/*,audio/*,image/*,.zip,.7z,.rar,.txt,.md,.json">
+          <div class="drop-icon" aria-hidden="true">
+            <svg viewBox="0 0 64 64"><path d="M32 43V12m0 0L20 24m12-12 12 12M13 39v10a4 4 0 0 0 4 4h30a4 4 0 0 0 4-4V39"/></svg>
+          </div>
+          <p class="drop-title">Перетащите файлы сюда</p>
+          <p class="drop-subtitle">или нажмите, чтобы выбрать</p>
+          <span class="format-list">MP4 · MOV · MKV · WAV · MP3 · PNG · JPG · ZIP</span>
+        </div>
+
+        <button class="token-toggle" id="tokenToggle" type="button">Ключ доступа</button>
+        <div class="token-box" id="tokenBox" hidden>
+          <label for="tokenInput">Ключ сервера</label>
+          <div>
+            <input id="tokenInput" type="password" autocomplete="off" placeholder="Оставьте пустым для локального режима">
+            <button id="saveToken" type="button">Сохранить</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="queue-section" aria-labelledby="queueTitle">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">02 / TRANSFER</p>
+          <h2 id="queueTitle">Очередь загрузки</h2>
+        </div>
+        <button id="clearFinished" class="ghost-button" type="button">Очистить готовые</button>
+      </div>
+      <div id="emptyQueue" class="empty-state">Выберите один или несколько файлов — прогресс появится здесь.</div>
+      <div id="uploadList" class="upload-list"></div>
+    </section>
+
+    <section class="files-section" aria-labelledby="filesTitle">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">03 / INBOX</p>
+          <h2 id="filesTitle">Принятые файлы</h2>
+        </div>
+        <button id="refreshFiles" class="ghost-button" type="button">Обновить</button>
+      </div>
+      <p class="destination" id="destinationPath">X:\AI\montage\inbox</p>
+      <div id="filesList" class="files-list"></div>
+    </section>
+  </main>
+
+  <template id="uploadTemplate">
+    <article class="upload-card">
+      <div class="file-badge">FILE</div>
+      <div class="file-main">
+        <div class="file-row">
+          <div class="file-copy">
+            <strong class="file-name"></strong>
+            <span class="file-meta"></span>
+          </div>
+          <span class="file-percent">0%</span>
+        </div>
+        <div class="progress-track"><div class="progress-value"></div></div>
+        <div class="file-row status-row">
+          <span class="file-status">Ожидает загрузки</span>
+          <span class="file-speed"></span>
+        </div>
+      </div>
+      <button class="cancel-button" type="button" aria-label="Отменить загрузку">×</button>
+    </article>
+  </template>
+
+  <script src="./config.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
