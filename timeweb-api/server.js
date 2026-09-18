@@ -116,6 +116,26 @@ function allowedOrigins(env) {
     .filter(Boolean);
 }
 
+function bucketCorsConfiguration(env) {
+  return {
+    CORSRules: [{
+      AllowedOrigins: allowedOrigins(env),
+      AllowedMethods: ['PUT', 'GET', 'HEAD'],
+      AllowedHeaders: ['*'],
+      ExposeHeaders: ['ETag'],
+      MaxAgeSeconds: 3600,
+    }],
+  };
+}
+
+async function configureBucketCors(s3, bucket, env) {
+  if (!bucket || !allowedOrigins(env).length) return;
+  await s3.send(new PutBucketCorsCommand({
+    Bucket: bucket,
+    CORSConfiguration: bucketCorsConfiguration(env),
+  }));
+}
+
 function processingOptions(value = {}) {
   const input = value && typeof value === 'object' ? value : {};
   return {
@@ -944,18 +964,7 @@ export function createApp(options = {}) {
   app.post('/api/admin/configure-cors', asyncRoute(async (request, response) => {
     const supplied = request.headers['x-admin-secret'] ?? '';
     if (!env.ADMIN_SECRET || supplied !== env.ADMIN_SECRET) throw new HttpError(401, 'Доступ запрещён');
-    await s3.send(new PutBucketCorsCommand({
-      Bucket: bucket,
-      CORSConfiguration: {
-        CORSRules: [{
-          AllowedOrigins: allowedOrigins(env),
-          AllowedMethods: ['PUT', 'GET', 'HEAD'],
-          AllowedHeaders: ['*'],
-          ExposeHeaders: ['ETag'],
-          MaxAgeSeconds: 3600,
-        }],
-      },
-    }));
+    await configureBucketCors(s3, bucket, env);
     response.json({ ok: true });
   }));
 
@@ -994,6 +1003,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const env = process.env;
   const s3 = createS3(env);
   const app = createApp({ env, s3 });
+  configureBucketCors(s3, env.S3_BUCKET, env)
+    .then(() => console.log('Storage CORS synchronized'))
+    .catch((error) => console.error('Storage CORS sync failed', error));
   const cleanup = () => {
     if (!env.S3_BUCKET) return;
     cleanupExpiredObjects(

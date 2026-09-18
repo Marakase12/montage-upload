@@ -24,6 +24,7 @@ const orderSection = document.querySelector('#orderSection');
 const orderForm = document.querySelector('#orderForm');
 const orderSubmit = document.querySelector('#orderSubmit');
 const orderStatus = document.querySelector('#orderStatus');
+const projectConsent = document.querySelector('#projectConsent');
 const customerName = document.querySelector('#customerName');
 const customerContact = document.querySelector('#customerContact');
 const projectType = document.querySelector('#projectType');
@@ -51,6 +52,7 @@ let uploadToken = linkToken
 let serverProtected = false;
 let apiAvailable = false;
 let maxFileSize = 1024 * 1024 * 1024;
+let pendingFiles = [];
 if (linkToken) {
   sessionStorage.setItem('montage-upload-link-token', linkToken);
   url.searchParams.delete('token');
@@ -66,7 +68,7 @@ function setAccessState(state) {
     accessText.textContent = 'Можно загружать файлы. Другие пользователи их не увидят.';
   } else if (state === 'locked') {
     accessTitle.textContent = 'Начните новый проект';
-    accessText.textContent = 'Выберите режим ниже — загрузка откроется сразу.';
+    accessText.textContent = 'Выберите файл — защищённый проект создастся автоматически.';
   }
 }
 
@@ -363,7 +365,7 @@ async function checkHealth() {
     limitValue.textContent = formatBytes(health.maxFileSize);
     maxFileSize = health.maxFileSize;
     chunkValue.textContent = formatBytes(health.chunkSize);
-    storageValue.textContent = health.cloud ? 'CLOUD' : 'LOCAL';
+    storageValue.textContent = health.cloud ? 'TIMEWEB' : 'LOCAL';
     retentionValue.textContent = `${health.retentionHours ?? 24} ч`;
     let tokenReady = !serverProtected;
     if (serverProtected && uploadToken) {
@@ -379,9 +381,9 @@ async function checkHealth() {
     }
     if (!tokenReady) {
       setAccessState('locked');
-      fileInput.disabled = true;
-      dropzone.classList.add('locked');
-      dropzone.setAttribute('aria-disabled', 'true');
+      fileInput.disabled = false;
+      dropzone.classList.remove('locked');
+      dropzone.removeAttribute('aria-disabled');
       if (manualTokenEnabled) tokenBox.hidden = false;
       filesSection.hidden = true;
       orderSection.hidden = false;
@@ -616,7 +618,32 @@ dropzone.addEventListener('keydown', (event) => {
     fileInput.click();
   }
 });
-fileInput.addEventListener('change', () => addFiles(fileInput.files));
+fileInput.addEventListener('change', async () => {
+  const selectedFiles = [...fileInput.files];
+  fileInput.value = '';
+  if (!selectedFiles.length) return;
+
+  if (!uploadToken) {
+    pendingFiles = selectedFiles;
+    if (!projectConsent.checked) {
+      orderStatus.className = 'form-status error';
+      orderStatus.textContent = 'Файл выбран. Подтвердите временное хранение и нажмите «Продолжить к загрузке».';
+      orderSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+
+    try {
+      await createProject();
+    } catch (error) {
+      orderStatus.className = 'form-status error';
+      orderStatus.textContent = error.message;
+      return;
+    }
+  }
+
+  addFiles(selectedFiles);
+  pendingFiles = [];
+});
 
 for (const eventName of ['dragenter', 'dragover']) {
   dropzone.addEventListener(eventName, (event) => {
@@ -644,8 +671,8 @@ clearFinished.addEventListener('click', () => {
 
 refreshFiles.addEventListener('click', loadFiles);
 refreshPipeline.addEventListener('click', loadPipeline);
-orderForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
+async function createProject() {
+  if (uploadToken) return;
   orderSubmit.disabled = true;
   orderStatus.className = 'form-status';
   orderStatus.textContent = 'Создаём защищённый проект…';
@@ -679,8 +706,23 @@ orderForm.addEventListener('submit', async (event) => {
   } catch (error) {
     orderStatus.className = 'form-status error';
     orderStatus.textContent = error.message;
+    throw error;
   } finally {
     orderSubmit.disabled = false;
+  }
+}
+
+orderForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    await createProject();
+    if (pendingFiles.length) {
+      const selectedFiles = pendingFiles;
+      pendingFiles = [];
+      addFiles(selectedFiles);
+    }
+  } catch {
+    // createProject already shows a user-friendly error.
   }
 });
 tokenToggle.addEventListener('click', () => { tokenBox.hidden = !tokenBox.hidden; });
