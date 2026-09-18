@@ -19,7 +19,7 @@ import express from 'express';
 const DEFAULT_MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE = 10 * 1024 * 1024;
 const DEFAULT_DIRECT_LIMIT = 20 * 1024 * 1024;
-const TOKEN_LIFETIME_SECONDS = 24 * 60 * 60;
+const DEFAULT_LINK_LIFETIME_HOURS = 24;
 const DEFAULT_RETENTION_HOURS = 24;
 const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(CURRENT_DIR, '../public');
@@ -218,6 +218,43 @@ function telegramMedia(message) {
   return message?.document || message?.video || message?.audio || message?.voice || message?.animation;
 }
 
+function telegramCommand(message) {
+  const text = String(message?.text ?? '').trim();
+  const command = text.split(/\s+/, 1)[0].toLowerCase().split('@', 1)[0];
+  return command;
+}
+
+export function createTelegramUploadAccess(message, env, now = Math.floor(Date.now() / 1000)) {
+  if (!message?.chat?.id) throw new HttpError(400, 'Не удалось определить пользователя');
+  if (!env.PUBLIC_SITE_URL) throw new Error('PUBLIC_SITE_URL is not configured');
+  const lifetimeHours = integer(env.UPLOAD_LINK_LIFETIME_HOURS, DEFAULT_LINK_LIFETIME_HOURS);
+  const job = {
+    kind: 'job',
+    jobId: `tg-${crypto.randomUUID()}`,
+    chatId: String(message.chat.id),
+    userId: String(message.from?.id ?? message.chat.id),
+    iat: now,
+    exp: now + lifetimeHours * 60 * 60,
+  };
+  const token = signToken(job, env.TOKEN_SECRET);
+  const uploadUrl = new URL(env.PUBLIC_SITE_URL);
+  uploadUrl.searchParams.set('token', token);
+  return { job, token, uploadUrl: uploadUrl.toString(), lifetimeHours };
+}
+
+async function sendUploadButton(env, message, lead) {
+  const access = createTelegramUploadAccess(message, env);
+  await sendTelegram(env, 'sendMessage', {
+    chat_id: message.chat.id,
+    ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+    text: `${lead}\n\nСсылка персональная и действует ${access.lifetimeHours} ч. Её не нужно пересылать другим.`,
+    reply_markup: {
+      inline_keyboard: [[{ text: 'Загрузить файлы', url: access.uploadUrl }]],
+    },
+  });
+  return access;
+}
+
 export function createApp(options = {}) {
   const env = options.env ?? process.env;
   const s3 = options.s3 ?? createS3(env);
@@ -396,6 +433,12 @@ export function createApp(options = {}) {
         chat_id: job.chatId,
         text: `✅ Файл «${session.name}» загружен. Размер: ${formatBytes(session.size)}.`,
       }).catch(() => {});
+      if (env.ADMIN_CHAT_ID && String(env.ADMIN_CHAT_ID) !== String(job.chatId)) {
+        await sendTelegram(env, 'sendMessage', {
+          chat_id: env.ADMIN_CHAT_ID,
+          text: `📥 Новый файл от пользователя ${job.userId || job.chatId}: «${session.name}», ${formatBytes(session.size)}.`,
+        }).catch(() => {});
+      }
     }
     response.json({
       uploadId: session.sessionId,
@@ -442,6 +485,18 @@ export function createApp(options = {}) {
       throw new HttpError(401, 'Неверный секрет webhook');
     }
     const message = request.body?.message || request.body?.edited_message;
+    const command = telegramCommand(message);
+    if (message?.chat?.id && ['/start', '/upload'].includes(command)) {
+      await sendUploadButton(
+        env,
+        message,
+        command === '/start'
+          ? 'Привет! Здесь можно безопасно передать видео, аудио, изображения и архивы.'
+          : 'Откройте защищённую страницу и выберите один или несколько файлов.',
+      );
+      response.json({ ok: true, handled: true });
+      return;
+    }
     const media = telegramMedia(message);
     if (!message?.chat?.id || !media?.file_size) {
       response.json({ ok: true, handled: false });
@@ -453,25 +508,11 @@ export function createApp(options = {}) {
       return;
     }
 
-    const now = Math.floor(Date.now() / 1000);
-    const token = signToken({
-      kind: 'job',
-      jobId: `tg-${message.chat.id}-${message.message_id}`,
-      chatId: String(message.chat.id),
-      userId: String(message.from?.id ?? ''),
-      iat: now,
-      exp: now + TOKEN_LIFETIME_SECONDS,
-    }, env.TOKEN_SECRET);
-    const uploadUrl = new URL(env.PUBLIC_SITE_URL);
-    uploadUrl.searchParams.set('token', token);
-    await sendTelegram(env, 'sendMessage', {
-      chat_id: message.chat.id,
-      reply_to_message_id: message.message_id,
-      text: `Файл больше лимита прямой отправки (${formatBytes(directLimit)}). Загрузите его через защищённую страницу — ссылка действует 24 часа.`,
-      reply_markup: {
-        inline_keyboard: [[{ text: 'Загрузить большой файл', url: uploadUrl.toString() }]],
-      },
-    });
+    await sendUploadButton(
+      env,
+      message,
+      `Файл больше лимита прямой отправки (${formatBytes(directLimit)}). Загрузите его через сайт.`,
+    );
     response.json({ ok: true, handled: true });
   }));
 

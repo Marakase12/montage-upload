@@ -27,10 +27,14 @@ MAX_FILE_SIZE_BYTES=1073741824
 CHUNK_SIZE_BYTES=10485760
 DIRECT_FILE_LIMIT_BYTES=20971520
 RETENTION_HOURS=24
+UPLOAD_LINK_LIFETIME_HOURS=24
 TELEGRAM_BOT_TOKEN=<добавить после создания бота>
 TELEGRAM_WEBHOOK_SECRET=<добавить после создания бота>
+ADMIN_CHAT_ID=<Telegram ID владельца для уведомлений>
 ```
 
 Сайт отдаётся этим же Express-приложением, поэтому отдельный фронтенд-хостинг не нужен. После деплоя вызовите `POST /api/admin/configure-cors` с заголовком `X-Admin-Secret`, чтобы браузер мог загружать части напрямую в бакет.
 
 Сервер каждый час удаляет объекты и незавершённые multipart-загрузки старше `RETENTION_HOURS`. Ручной запуск: `POST /api/admin/cleanup`.
+
+Каждый Telegram-пользователь получает собственную подписанную ссылку по команде `/start` или `/upload`. Объекты хранятся в разных job-префиксах, поэтому один клиент не видит файлы другого.
