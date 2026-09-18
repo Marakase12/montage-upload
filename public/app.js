@@ -6,11 +6,16 @@ const template = document.querySelector('#uploadTemplate');
 const clearFinished = document.querySelector('#clearFinished');
 const refreshFiles = document.querySelector('#refreshFiles');
 const filesList = document.querySelector('#filesList');
+const filesSection = document.querySelector('#filesSection');
 const destinationPath = document.querySelector('#destinationPath');
 const serverState = document.querySelector('#serverState');
 const limitValue = document.querySelector('#limitValue');
 const chunkValue = document.querySelector('#chunkValue');
 const storageValue = document.querySelector('#storageValue');
+const retentionValue = document.querySelector('#retentionValue');
+const accessBanner = document.querySelector('#accessBanner');
+const accessTitle = document.querySelector('#accessTitle');
+const accessText = document.querySelector('#accessText');
 const tokenToggle = document.querySelector('#tokenToggle');
 const tokenBox = document.querySelector('#tokenBox');
 const tokenInput = document.querySelector('#tokenInput');
@@ -19,6 +24,8 @@ const saveToken = document.querySelector('#saveToken');
 const tasks = new Set();
 const config = window.MONTAGE_UPLOAD_CONFIG ?? {};
 const apiBase = String(config.apiBase ?? '').replace(/\/$/, '');
+const manualTokenEnabled = config.allowManualToken === true
+  || ['localhost', '127.0.0.1'].includes(window.location.hostname);
 const url = new URL(window.location.href);
 const linkToken = url.searchParams.get('token') ?? '';
 let uploadToken = linkToken
@@ -32,6 +39,18 @@ if (linkToken) {
   history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
 }
 tokenInput.value = uploadToken;
+tokenToggle.hidden = !manualTokenEnabled;
+
+function setAccessState(state) {
+  accessBanner.dataset.state = state;
+  if (state === 'ready') {
+    accessTitle.textContent = 'Защищённая ссылка активна';
+    accessText.textContent = 'Файлы будут доступны только исполнителю заказа.';
+  } else if (state === 'locked') {
+    accessTitle.textContent = 'Нужна персональная ссылка';
+    accessText.textContent = 'Вернитесь в Telegram и нажмите кнопку «Загрузить большой файл».';
+  }
+}
 
 function uploadStateKey(file) {
   return `montage-upload:${file.name}:${file.size}:${file.lastModified}`;
@@ -309,7 +328,21 @@ async function checkHealth() {
     limitValue.textContent = formatBytes(health.maxFileSize);
     chunkValue.textContent = formatBytes(health.chunkSize);
     storageValue.textContent = health.cloud ? 'CLOUD' : 'LOCAL';
-    if (serverProtected && !uploadToken) tokenBox.hidden = false;
+    retentionValue.textContent = `${health.retentionHours ?? 24} ч`;
+    if (serverProtected && !uploadToken) {
+      setAccessState('locked');
+      fileInput.disabled = true;
+      dropzone.classList.add('locked');
+      dropzone.setAttribute('aria-disabled', 'true');
+      if (manualTokenEnabled) tokenBox.hidden = false;
+      filesSection.hidden = true;
+    } else {
+      setAccessState('ready');
+      fileInput.disabled = false;
+      dropzone.classList.remove('locked');
+      dropzone.removeAttribute('aria-disabled');
+      filesSection.hidden = false;
+    }
   } catch (error) {
     serverState.className = 'server-state offline';
     serverState.querySelector('span:last-child').textContent = error.message;
@@ -387,6 +420,10 @@ saveToken.addEventListener('click', async () => {
   await loadFiles();
 });
 
-updateEmptyState();
-checkHealth();
-loadFiles();
+async function initialize() {
+  updateEmptyState();
+  await checkHealth();
+  if (!serverProtected || uploadToken) await loadFiles();
+}
+
+initialize();

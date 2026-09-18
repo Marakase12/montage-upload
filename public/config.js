@@ -1,5 +1,5 @@
-// Для локального режима оставьте apiBase пустым.
-// После публикации Worker замените адрес на его публичный URL.
+// Пустой apiBase означает, что сайт и API работают на одном домене.
 window.MONTAGE_UPLOAD_CONFIG = {
   apiBase: '',
+  allowManualToken: false,
 };

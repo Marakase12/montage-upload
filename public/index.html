@@ -25,15 +25,27 @@
       </div>
     </header>
 
+    <div class="access-banner" id="accessBanner" role="status">
+      <span class="access-icon" aria-hidden="true">✓</span>
+      <div>
+        <strong id="accessTitle">Проверяем защищённую ссылку</strong>
+        <span id="accessText">Эта страница доступна только по персональной ссылке из Telegram.</span>
+      </div>
+    </div>
+
     <section class="hero-grid">
       <div class="intro">
         <p class="kicker">01 / INGEST</p>
         <h2>Передайте файлы<br><span>без ограничения чата</span></h2>
-        <p class="lead">Видео, звук, изображения и архивы загружаются частями. Если соединение оборвётся, повторный выбор того же файла продолжит загрузку.</p>
+        <p class="lead">Видео, звук, изображения и архивы загружаются частями. Если интернет оборвётся, снова выберите тот же файл — загрузка продолжится.</p>
         <div class="stats">
           <div><strong id="limitValue">—</strong><span>максимальный файл</span></div>
           <div><strong id="chunkValue">—</strong><span>размер части</span></div>
           <div><strong id="storageValue">LOCAL</strong><span>хранение исходников</span></div>
+        </div>
+        <div class="trust-row">
+          <span>Защищённая ссылка</span>
+          <span>Автоудаление через <b id="retentionValue">24 ч</b></span>
         </div>
       </div>
 
@@ -49,7 +61,7 @@
           <span class="format-list">MP4 · MOV · MKV · WAV · MP3 · PNG · JPG · ZIP</span>
         </div>
 
-        <button class="token-toggle" id="tokenToggle" type="button">Ключ доступа</button>
+        <button class="token-toggle" id="tokenToggle" type="button" hidden>Ключ доступа</button>
         <div class="token-box" id="tokenBox" hidden>
           <label for="tokenInput">Ключ сервера</label>
           <div>
@@ -60,10 +72,24 @@
       </div>
     </section>
 
+    <section class="how-section" aria-labelledby="howTitle">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">02 / HOW IT WORKS</p>
+          <h2 id="howTitle">Три простых шага</h2>
+        </div>
+      </div>
+      <div class="steps">
+        <article><span>01</span><strong>Выберите файл</strong><p>Можно добавить сразу несколько исходников.</p></article>
+        <article><span>02</span><strong>Дождитесь 100%</strong><p>Не закрывайте вкладку, пока идёт передача.</p></article>
+        <article><span>03</span><strong>Готово</strong><p>Бот сообщит, когда файл будет принят.</p></article>
+      </div>
+    </section>
+
     <section class="queue-section" aria-labelledby="queueTitle">
       <div class="section-heading">
         <div>
-          <p class="kicker">02 / TRANSFER</p>
+          <p class="kicker">03 / TRANSFER</p>
           <h2 id="queueTitle">Очередь загрузки</h2>
         </div>
         <button id="clearFinished" class="ghost-button" type="button">Очистить готовые</button>
@@ -72,10 +98,10 @@
       <div id="uploadList" class="upload-list"></div>
     </section>
 
-    <section class="files-section" aria-labelledby="filesTitle">
+    <section class="files-section" id="filesSection" aria-labelledby="filesTitle">
       <div class="section-heading">
         <div>
-          <p class="kicker">03 / INBOX</p>
+          <p class="kicker">04 / INBOX</p>
           <h2 id="filesTitle">Принятые файлы</h2>
         </div>
         <button id="refreshFiles" class="ghost-button" type="button">Обновить</button>
@@ -83,6 +109,7 @@
       <p class="destination" id="destinationPath">X:\AI\montage\inbox</p>
       <div id="filesList" class="files-list"></div>
     </section>
+    <footer>Файлы хранятся временно и удаляются автоматически. Не передавайте персональную ссылку другим.</footer>
   </main>
 
   <template id="uploadTemplate">

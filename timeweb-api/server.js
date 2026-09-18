@@ -1,10 +1,13 @@
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
+  DeleteObjectsCommand,
   ListObjectsV2Command,
+  ListMultipartUploadsCommand,
   ListPartsCommand,
   PutBucketCorsCommand,
   S3Client,
@@ -17,6 +20,9 @@ const DEFAULT_MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE = 10 * 1024 * 1024;
 const DEFAULT_DIRECT_LIMIT = 20 * 1024 * 1024;
 const TOKEN_LIFETIME_SECONDS = 24 * 60 * 60;
+const DEFAULT_RETENTION_HOURS = 24;
+const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.resolve(CURRENT_DIR, '../public');
 const ALLOWED_EXTENSIONS = new Set([
   '.mp4', '.mov', '.mkv', '.webm', '.avi', '.mxf',
   '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg',
@@ -137,6 +143,56 @@ async function listAllParts(s3, bucket, key, uploadId) {
   return parts.sort((a, b) => a.PartNumber - b.PartNumber);
 }
 
+async function cleanupExpiredObjects(s3, bucket, retentionHours) {
+  const cutoff = Date.now() - retentionHours * 60 * 60 * 1000;
+  let continuationToken;
+  let deleted = 0;
+
+  do {
+    const page = await s3.send(new ListObjectsV2Command({
+      Bucket: bucket,
+      ContinuationToken: continuationToken,
+      MaxKeys: 1000,
+    }));
+    const expired = (page.Contents ?? [])
+      .filter((object) => object.Key && object.LastModified?.getTime() < cutoff)
+      .map((object) => ({ Key: object.Key }));
+    if (expired.length) {
+      await s3.send(new DeleteObjectsCommand({
+        Bucket: bucket,
+        Delete: { Objects: expired, Quiet: true },
+      }));
+      deleted += expired.length;
+    }
+    continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+  } while (continuationToken);
+
+  let keyMarker;
+  let uploadIdMarker;
+  let aborted = 0;
+  do {
+    const page = await s3.send(new ListMultipartUploadsCommand({
+      Bucket: bucket,
+      KeyMarker: keyMarker,
+      UploadIdMarker: uploadIdMarker,
+      MaxUploads: 1000,
+    }));
+    const stale = (page.Uploads ?? []).filter(
+      (upload) => upload.Key && upload.UploadId && upload.Initiated?.getTime() < cutoff,
+    );
+    await Promise.all(stale.map((upload) => s3.send(new AbortMultipartUploadCommand({
+      Bucket: bucket,
+      Key: upload.Key,
+      UploadId: upload.UploadId,
+    }))));
+    aborted += stale.length;
+    keyMarker = page.IsTruncated ? page.NextKeyMarker : undefined;
+    uploadIdMarker = page.IsTruncated ? page.NextUploadIdMarker : undefined;
+  } while (keyMarker || uploadIdMarker);
+
+  return { deleted, aborted };
+}
+
 function formatBytes(value) {
   const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
   let amount = Number(value) || 0;
@@ -170,11 +226,20 @@ export function createApp(options = {}) {
   const app = express();
 
   app.disable('x-powered-by');
+  app.set('trust proxy', true);
   app.use(express.json({ limit: '64kb' }));
   app.use((request, response, next) => {
     const origin = request.headers.origin?.replace(/\/$/, '');
     const allowed = allowedOrigins(env);
-    if (origin && !allowed.includes(origin)) {
+    let sameOrigin = false;
+    if (origin) {
+      try {
+        sameOrigin = new URL(origin).host === request.headers.host;
+      } catch {
+        sameOrigin = false;
+      }
+    }
+    if (origin && !sameOrigin && !allowed.includes(origin)) {
       next(new HttpError(403, 'Этот сайт не разрешён'));
       return;
     }
@@ -213,6 +278,7 @@ export function createApp(options = {}) {
       protected: true,
       maxFileSize: integer(env.MAX_FILE_SIZE_BYTES, DEFAULT_MAX_FILE_SIZE),
       chunkSize: Math.max(integer(env.CHUNK_SIZE_BYTES, DEFAULT_CHUNK_SIZE), 5 * 1024 * 1024),
+      retentionHours: integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS),
     });
   });
 
@@ -427,6 +493,19 @@ export function createApp(options = {}) {
     response.json({ ok: true });
   }));
 
+  app.post('/api/admin/cleanup', asyncRoute(async (request, response) => {
+    const supplied = request.headers['x-admin-secret'] ?? '';
+    if (!env.ADMIN_SECRET || supplied !== env.ADMIN_SECRET) throw new HttpError(401, 'Доступ запрещён');
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const retentionHours = integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS);
+    response.json({ ok: true, retentionHours, ...(await cleanupExpiredObjects(s3, bucket, retentionHours)) });
+  }));
+
+  app.use(express.static(PUBLIC_DIR, {
+    index: 'index.html',
+    maxAge: env.NODE_ENV === 'production' ? '1h' : 0,
+  }));
+
   app.use((error, request, response, next) => {
     if (response.headersSent) {
       next(error);
@@ -446,7 +525,23 @@ export { signToken, verifyToken };
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const port = integer(process.env.PORT, 3000);
-  createApp().listen(port, '0.0.0.0', () => {
+  const env = process.env;
+  const s3 = createS3(env);
+  const app = createApp({ env, s3 });
+  const cleanup = () => {
+    if (!env.S3_BUCKET) return;
+    cleanupExpiredObjects(
+      s3,
+      env.S3_BUCKET,
+      integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS),
+    ).then(({ deleted, aborted }) => {
+      if (deleted || aborted) console.log(`Storage cleanup: deleted=${deleted}, aborted=${aborted}`);
+    }).catch((error) => console.error('Storage cleanup failed', error));
+  };
+  cleanup();
+  const timer = setInterval(cleanup, 60 * 60 * 1000);
+  timer.unref();
+  app.listen(port, '0.0.0.0', () => {
     console.log(`Timeweb upload API listening on 0.0.0.0:${port}`);
   });
 }
