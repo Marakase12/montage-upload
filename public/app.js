@@ -10,6 +10,7 @@ const destinationPath = document.querySelector('#destinationPath');
 const serverState = document.querySelector('#serverState');
 const limitValue = document.querySelector('#limitValue');
 const chunkValue = document.querySelector('#chunkValue');
+const storageValue = document.querySelector('#storageValue');
 const tokenToggle = document.querySelector('#tokenToggle');
 const tokenBox = document.querySelector('#tokenBox');
 const tokenInput = document.querySelector('#tokenInput');
@@ -163,21 +164,42 @@ async function uploadFile(task) {
       const end = Math.min(start + session.chunkSize, task.file.size);
       const chunk = task.file.slice(start, end);
 
-      const partResult = await retry(task, () => fetch(`${apiBase}/api/uploads/${encodeURIComponent(session.uploadId)}/chunks/${index}`, {
-        method: 'PUT',
-        headers: requestHeaders({
-          'Content-Type': 'application/octet-stream',
-          ...(task.sessionToken ? { 'X-Upload-Session': task.sessionToken } : {}),
-        }),
-        body: chunk,
-        signal: task.controller.signal,
-      }).then(async (response) => {
+      const partResult = await retry(task, async () => {
+        if (session.provider === 's3-direct') {
+          const signed = await api(
+            `/api/uploads/${encodeURIComponent(session.uploadId)}/chunks/${index}`,
+            {
+              method: 'POST',
+              headers: task.sessionToken ? { 'X-Upload-Session': task.sessionToken } : {},
+            },
+          );
+          const response = await fetch(signed.uploadUrl, {
+            method: 'PUT',
+            body: chunk,
+            signal: task.controller.signal,
+          });
+          if (!response.ok) throw new Error(`Хранилище отклонило часть ${index + 1}`);
+          return { etag: response.headers.get('ETag') };
+        }
+
+        const response = await fetch(
+          `${apiBase}/api/uploads/${encodeURIComponent(session.uploadId)}/chunks/${index}`,
+          {
+            method: 'PUT',
+            headers: requestHeaders({
+              'Content-Type': 'application/octet-stream',
+              ...(task.sessionToken ? { 'X-Upload-Session': task.sessionToken } : {}),
+            }),
+            body: chunk,
+            signal: task.controller.signal,
+          },
+        );
         if (!response.ok) {
           const payload = await response.json().catch(() => ({}));
           throw new Error(payload.error ?? `Ошибка части ${index + 1}`);
         }
         return response.json().catch(() => ({}));
-      }));
+      });
 
       if (partResult?.etag) {
         uploadedParts.set(index, { partNumber: index + 1, etag: partResult.etag });
@@ -286,6 +308,7 @@ async function checkHealth() {
     serverState.querySelector('span:last-child').textContent = 'Сервер готов';
     limitValue.textContent = formatBytes(health.maxFileSize);
     chunkValue.textContent = formatBytes(health.chunkSize);
+    storageValue.textContent = health.cloud ? 'CLOUD' : 'LOCAL';
     if (serverProtected && !uploadToken) tokenBox.hidden = false;
   } catch (error) {
     serverState.className = 'server-state offline';

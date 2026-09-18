@@ -7,9 +7,7 @@
   "scripts": {
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",
-    "test": "node --test",
-    "worker:dev": "npx wrangler dev --config worker/wrangler.jsonc",
-    "worker:deploy": "npx wrangler deploy --config worker/wrangler.jsonc"
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20"
