@@ -164,7 +164,7 @@
         <button id="clearFinished" class="ghost-button" type="button">Очистить готовые</button>
       </div>
       <div id="emptyQueue" class="empty-state">Выберите один или несколько файлов — прогресс появится здесь.</div>
-      <div id="uploadList" class="upload-list"></div>
+      <div id="uploadList" class="upload-list" aria-live="polite"></div>
     </section>
 
     <section class="files-section" id="filesSection" aria-labelledby="filesTitle">
@@ -213,6 +213,6 @@
   </template>
 
   <script src="./config.js?v=cloud-upload-v1"></script>
-  <script type="module" src="./app.js?v=cloud-upload-v3"></script>
+  <script type="module" src="./app.js?v=cloud-upload-v4"></script>
 </body>
 </html>

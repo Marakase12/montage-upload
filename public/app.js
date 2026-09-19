@@ -37,6 +37,7 @@ const hookEnabled = document.querySelector('#hookEnabled');
 const pipelineSection = document.querySelector('#pipelineSection');
 const pipelineList = document.querySelector('#pipelineList');
 const refreshPipeline = document.querySelector('#refreshPipeline');
+const queueSection = document.querySelector('.queue-section');
 
 const tasks = new Set();
 const config = window.MONTAGE_UPLOAD_CONFIG ?? {};
@@ -52,7 +53,8 @@ let uploadToken = linkToken
 let serverProtected = false;
 let apiAvailable = false;
 let maxFileSize = 1024 * 1024 * 1024;
-let pendingFiles = [];
+let pendingTasks = [];
+let creatingProject = false;
 if (linkToken) {
   sessionStorage.setItem('montage-upload-link-token', linkToken);
   url.searchParams.delete('token');
@@ -107,12 +109,24 @@ function requestHeaders(extra = {}) {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(`${apiBase}${url}`, {
-    ...options,
-    headers: requestHeaders(options.headers ?? {}),
-  });
+  let response;
+  try {
+    response = await fetch(`${apiBase}${url}`, {
+      ...options,
+      headers: requestHeaders(options.headers ?? {}),
+    });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error('Нет ответа от Timeweb API. Возможна проблема сервиса или сети; попробуйте ещё раз позже.', { cause: error });
+    }
+    throw error;
+  }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error ?? `Ошибка сервера: ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(payload.error ?? `Ошибка сервера: ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 
@@ -122,16 +136,17 @@ function fileKind(name) {
 }
 
 function updateEmptyState() {
-  emptyQueue.hidden = tasks.size > 0;
+  emptyQueue.hidden = uploadList.children.length > 0;
 }
 
 function setCardState(task, state, message) {
   task.state = state;
   task.card.classList.toggle('complete', state === 'complete');
   task.card.classList.toggle('error', state === 'error');
+  task.card.classList.toggle('waiting', ['queued', 'connecting'].includes(state));
   task.status.textContent = message;
-  if (state === 'complete') task.cancelButton.textContent = '✓';
-  if (state === 'error') task.cancelButton.textContent = '↻';
+  task.cancelButton.textContent = state === 'complete' ? '✓' : state === 'error' ? '↻' : '×';
+  task.cancelButton.setAttribute('aria-label', state === 'error' ? 'Повторить загрузку' : 'Убрать файл из очереди');
 }
 
 function renderProgress(task, uploadedBytes) {
@@ -166,7 +181,7 @@ async function retry(task, operation, attempts = 4) {
 
 async function uploadFile(task) {
   try {
-    setCardState(task, 'uploading', 'Подготавливаем загрузку…');
+    setCardState(task, 'connecting', 'Подключаемся к Timeweb… файл пока не отправлен');
     const previousState = readUploadState(task.file);
     const session = await api('/api/uploads', {
       method: 'POST',
@@ -256,6 +271,7 @@ async function uploadFile(task) {
       task.status.textContent = `Часть ${index + 1} из ${session.totalChunks}`;
     }
 
+    setCardState(task, 'finalizing', 'Передача завершена · проверяем файл и запускаем обработку…');
     const result = await api(`/api/uploads/${encodeURIComponent(session.uploadId)}/complete`, {
       method: 'POST',
       headers: {
@@ -269,19 +285,23 @@ async function uploadFile(task) {
     clearUploadState(task.file);
     renderProgress(task, task.file.size);
     task.speed.textContent = formatBytes(task.file.size);
-    setCardState(task, 'complete', `Готово · ${result.name}`);
+    setCardState(task, 'complete', result.pipelineQueued
+      ? 'Загружено · видео в очереди обработки, статус появится ниже'
+      : `Загружено · ${result.name}`);
     await loadFiles();
     await loadPipeline();
   } catch (error) {
     if (error.name === 'AbortError' || task.cancelled) {
       setCardState(task, 'cancelled', 'Загрузка отменена');
     } else {
-      setCardState(task, 'error', error.message);
+      setCardState(task, 'error', error instanceof TypeError
+        ? 'Нет связи с облачным хранилищем. Подтверждённые части сохранены — нажмите ↻.'
+        : error.message);
     }
   }
 }
 
-function createTask(file) {
+function createTask(file, startImmediately = true) {
   const card = template.content.firstElementChild.cloneNode(true);
   const task = {
     file,
@@ -304,13 +324,20 @@ function createTask(file) {
   card.querySelector('.file-meta').textContent = `${formatBytes(file.size)} · ${file.type || 'неизвестный формат'}`;
 
   task.cancelButton.addEventListener('click', async () => {
-    if (task.state === 'complete' || task.state === 'cancelled') {
+    if (['complete', 'cancelled', 'queued'].includes(task.state)) {
       tasks.delete(task);
+      pendingTasks = pendingTasks.filter((pending) => pending !== task);
       card.remove();
       updateEmptyState();
       return;
     }
     if (task.state === 'error') {
+      if (!uploadToken) {
+        setCardState(task, 'queued', 'Ожидает подключения к Timeweb. Нажмите «Продолжить к загрузке».');
+        if (!pendingTasks.includes(task)) pendingTasks.push(task);
+        orderSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
       task.cancelled = false;
       task.startedAt = performance.now();
       task.initialUploaded = 0;
@@ -332,10 +359,13 @@ function createTask(file) {
   tasks.add(task);
   uploadList.append(card);
   updateEmptyState();
-  uploadFile(task);
+  if (startImmediately) uploadFile(task);
+  else setCardState(task, 'queued', 'Файл выбран · ожидает создания проекта, ещё не отправлен');
+  return task;
 }
 
-function addFiles(fileList) {
+function addFiles(fileList, startImmediately = true) {
+  const added = [];
   [...fileList].forEach((file) => {
     if (file.size > maxFileSize) {
       const card = template.content.firstElementChild.cloneNode(true);
@@ -350,9 +380,26 @@ function addFiles(fileList) {
       emptyQueue.hidden = true;
       return;
     }
-    createTask(file);
+    added.push(createTask(file, startImmediately));
   });
   fileInput.value = '';
+  return added;
+}
+
+function startPendingTasks() {
+  if (!uploadToken) return;
+  const ready = pendingTasks;
+  pendingTasks = [];
+  ready.filter((task) => tasks.has(task) && !task.cancelled).forEach((task) => uploadFile(task));
+  if (ready.length) queueSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function showPendingConnectionError(message) {
+  pendingTasks.forEach((task) => {
+    if (tasks.has(task) && !task.cancelled) {
+      setCardState(task, 'error', `Файл не отправлен · ${message}`);
+    }
+  });
 }
 
 async function checkHealth() {
@@ -372,7 +419,8 @@ async function checkHealth() {
       try {
         await api('/api/session');
         tokenReady = true;
-      } catch {
+      } catch (error) {
+        if (![401, 403].includes(error.status)) throw error;
         uploadToken = '';
         tokenInput.value = '';
         sessionStorage.removeItem('montage-upload-link-token');
@@ -420,7 +468,7 @@ async function checkHealth() {
     accessTitle.textContent = 'Облако временно недоступно';
     accessText.textContent = 'Файл можно выбрать сейчас. Когда связь восстановится, нажмите «Продолжить к загрузке».';
     orderStatus.className = 'form-status error';
-    orderStatus.textContent = `Timeweb API не отвечает: ${error.message}`;
+    orderStatus.textContent = error.message;
     fileInput.disabled = false;
     dropzone.classList.remove('locked');
     dropzone.removeAttribute('aria-disabled');
@@ -625,32 +673,37 @@ dropzone.addEventListener('keydown', (event) => {
     fileInput.click();
   }
 });
-fileInput.addEventListener('change', async () => {
-  const selectedFiles = [...fileInput.files];
-  fileInput.value = '';
+async function handleSelectedFiles(fileList) {
+  const selectedFiles = [...fileList];
   if (!selectedFiles.length) return;
 
   if (!uploadToken) {
-    pendingFiles = selectedFiles;
+    pendingTasks.push(...addFiles(selectedFiles, false));
     if (!projectConsent.checked) {
       orderStatus.className = 'form-status error';
       orderStatus.textContent = 'Файл выбран. Подтвердите временное хранение и нажмите «Продолжить к загрузке».';
       orderSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
+    if (creatingProject) return;
 
     try {
       await createProject();
+      startPendingTasks();
     } catch (error) {
       orderStatus.className = 'form-status error';
       orderStatus.textContent = error.message;
+      showPendingConnectionError(error.message);
       return;
     }
+    return;
   }
 
   addFiles(selectedFiles);
-  pendingFiles = [];
-});
+  queueSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+fileInput.addEventListener('change', () => handleSelectedFiles(fileInput.files));
 
 for (const eventName of ['dragenter', 'dragover']) {
   dropzone.addEventListener(eventName, (event) => {
@@ -664,7 +717,7 @@ for (const eventName of ['dragleave', 'drop']) {
     dropzone.classList.remove('dragging');
   });
 }
-dropzone.addEventListener('drop', (event) => addFiles(event.dataTransfer.files));
+dropzone.addEventListener('drop', (event) => handleSelectedFiles(event.dataTransfer.files));
 
 clearFinished.addEventListener('click', () => {
   [...tasks].forEach((task) => {
@@ -680,6 +733,8 @@ refreshFiles.addEventListener('click', loadFiles);
 refreshPipeline.addEventListener('click', loadPipeline);
 async function createProject() {
   if (uploadToken) return;
+  if (creatingProject) return;
+  creatingProject = true;
   orderSubmit.disabled = true;
   orderStatus.className = 'form-status';
   orderStatus.textContent = 'Создаём защищённый проект…';
@@ -706,30 +761,27 @@ async function createProject() {
     sessionStorage.setItem('montage-upload-link-token', uploadToken);
     orderStatus.className = 'form-status success';
     orderStatus.textContent = 'Проект создан. Открываем загрузку…';
-    await checkHealth();
-    await loadFiles();
-    await loadPipeline();
-    dropzone.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    void Promise.allSettled([checkHealth(), loadFiles(), loadPipeline()]);
+    if (!pendingTasks.length) dropzone.scrollIntoView({ behavior: 'smooth', block: 'center' });
   } catch (error) {
     orderStatus.className = 'form-status error';
     orderStatus.textContent = error.message;
     throw error;
   } finally {
+    creatingProject = false;
     orderSubmit.disabled = false;
   }
 }
 
 orderForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (creatingProject) return;
   try {
     await createProject();
-    if (pendingFiles.length) {
-      const selectedFiles = pendingFiles;
-      pendingFiles = [];
-      addFiles(selectedFiles);
-    }
+    startPendingTasks();
   } catch {
     // createProject already shows a user-friendly error.
+    showPendingConnectionError(orderStatus.textContent);
   }
 });
 tokenToggle.addEventListener('click', () => { tokenBox.hidden = !tokenBox.hidden; });

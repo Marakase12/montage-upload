@@ -420,6 +420,9 @@ h2 span {
 .file-percent { color: var(--primary-bright); font-variant-numeric: tabular-nums; }
 .progress-track { height: 5px; margin: 15px 0 12px; overflow: hidden; border-radius: 999px; background: #293241; }
 .progress-value { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--primary), var(--cyan)); box-shadow: 0 0 18px rgba(108, 131, 255, 0.48); transition: width 180ms linear; }
+.waiting .progress-value { width: 30% !important; animation: transfer-wait 1.6s ease-in-out infinite alternate; }
+@keyframes transfer-wait { from { transform: translateX(0); } to { transform: translateX(230%); } }
+@media (prefers-reduced-motion: reduce) { .waiting .progress-value { animation: none; } }
 .complete .progress-value { background: var(--mint); box-shadow: 0 0 15px rgba(66, 211, 165, 0.42); }
 .complete .file-percent, .complete .file-status { color: var(--mint); }
 .error .file-status { color: var(--danger); }
