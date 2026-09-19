@@ -23,7 +23,10 @@ const DEFAULT_CHUNK_SIZE = 10 * 1024 * 1024;
 const DEFAULT_DIRECT_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_LINK_LIFETIME_HOURS = 24;
 const DEFAULT_RETENTION_HOURS = 24;
-const PROCESSABLE_VIDEO_EXTENSIONS = new Set(['.mp4']);
+const PROCESSABLE_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv']);
+export function isProcessableVideoFile(name) {
+  return PROCESSABLE_VIDEO_EXTENSIONS.has(path.extname(name).toLowerCase());
+}
 const PIPELINE_STATES = new Set([
   'QUEUED', 'PROCESSING', 'READY_FOR_REVIEW', 'LONG_CANDIDATES_READY', 'APPROVED', 'FAILED',
 ]);
@@ -622,9 +625,8 @@ export function createApp(options = {}) {
       MultipartUpload: { Parts: parts },
     }));
 
-    const extension = path.extname(session.name).toLowerCase();
     let pipelineTask = null;
-    if (PROCESSABLE_VIDEO_EXTENSIONS.has(extension)) {
+    if (isProcessableVideoFile(session.name)) {
       pipelineTask = {
         version: 1,
         taskId: session.sessionId,

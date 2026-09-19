@@ -333,6 +333,7 @@ h2 span {
 }
 .drop-panel::after, .scanline { display: none; }
 .dropzone {
+  position: relative;
   min-height: 350px;
   display: flex;
   flex-direction: column;
@@ -347,11 +348,20 @@ h2 span {
   cursor: pointer;
   transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
 }
-.dropzone:hover, .dropzone:focus-visible, .dropzone.dragging {
+.dropzone:hover, .dropzone:focus-within, .dropzone.dragging {
   outline: none;
   border-color: var(--primary-bright);
   background: radial-gradient(circle at 50% 42%, rgba(108, 131, 255, 0.2), transparent 56%);
   transform: translateY(-2px);
+}
+.drop-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 2;
 }
 .dropzone.locked { cursor: not-allowed; opacity: 0.58; transform: none; }
 .dropzone.locked:hover { border-color: rgba(143, 160, 255, 0.33); }

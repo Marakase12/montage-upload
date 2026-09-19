@@ -675,13 +675,6 @@ async function loadPipeline() {
   }
 }
 
-dropzone.addEventListener('click', () => fileInput.click());
-dropzone.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' || event.key === ' ') {
-    event.preventDefault();
-    fileInput.click();
-  }
-});
 async function handleSelectedFiles(fileList) {
   const selectedFiles = [...fileList];
   if (!selectedFiles.length) return;

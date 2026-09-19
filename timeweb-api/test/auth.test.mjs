@@ -4,11 +4,19 @@ import {
   createApp,
   createTelegramUploadAccess,
   createWebUploadAccess,
+  isProcessableVideoFile,
   signToken,
   verifyToken,
 } from '../server.js';
 
 const secret = 'test-secret-that-is-long-enough';
+
+test('MP4, MOV и MKV ставятся в очередь обработки', () => {
+  for (const name of ['clip.mp4', 'iphone.MOV', 'long.mkv']) {
+    assert.equal(isProcessableVideoFile(name), true, name);
+  }
+  assert.equal(isProcessableVideoFile('notes.txt'), false);
+});
 
 test('подписывает и проверяет временную ссылку', () => {
   const token = signToken({
