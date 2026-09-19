@@ -418,7 +418,7 @@ async function checkHealth() {
     serverState.className = 'server-state offline';
     serverState.querySelector('span:last-child').textContent = 'Нет связи с сервером';
     accessTitle.textContent = 'Облако временно недоступно';
-    accessText.textContent = 'Файл можно выбрать сейчас. Загрузка начнётся после восстановления связи.';
+    accessText.textContent = 'Файл можно выбрать сейчас. Когда связь восстановится, нажмите «Продолжить к загрузке».';
     orderStatus.className = 'form-status error';
     orderStatus.textContent = `Timeweb API не отвечает: ${error.message}`;
     fileInput.disabled = false;
