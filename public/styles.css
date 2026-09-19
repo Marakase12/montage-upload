@@ -472,7 +472,10 @@ h2 span {
 .pipeline-card-header span { color: var(--primary-bright); font-variant-numeric: tabular-nums; }
 .pipeline-card p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
 .pipeline-card small { color: var(--muted-dark); font-size: 12px; }
-.preview-button { display: inline-flex; margin-top: 18px; padding: 11px 15px; color: white; border-radius: var(--radius-sm); background: linear-gradient(135deg, #5267d8, var(--primary)); text-decoration: none; font-size: 13px; font-weight: 700; }
+.result-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.preview-button, .download-button { display: inline-flex; padding: 11px 15px; color: white; border-radius: var(--radius-sm); text-decoration: none; font-size: 13px; font-weight: 700; }
+.preview-button { background: linear-gradient(135deg, #5267d8, var(--primary)); }
+.download-button { background: #1f906e; }
 .review-actions { display: grid; gap: 10px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
 .review-actions textarea { width: 100%; min-height: 82px; padding: 12px; resize: vertical; color: white; border: 1px solid var(--line); border-radius: var(--radius-sm); background: rgba(8, 12, 19, 0.6); font: inherit; }
 .review-actions textarea:focus { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(108, 131, 255, 0.1); }

@@ -664,14 +664,27 @@ async function loadPipeline() {
         });
         card.append(candidates);
       }
-      if (task.previewUrl) {
-        const preview = document.createElement('a');
-        preview.className = 'preview-button';
-        preview.href = task.previewUrl;
-        preview.target = '_blank';
-        preview.rel = 'noopener';
-        preview.textContent = 'Открыть готовый preview';
-        card.append(preview);
+      if (task.previewUrl || task.downloadUrl) {
+        const links = document.createElement('div');
+        links.className = 'result-links';
+        if (task.previewUrl) {
+          const preview = document.createElement('a');
+          preview.className = 'preview-button';
+          preview.href = task.previewUrl;
+          preview.target = '_blank';
+          preview.rel = 'noopener';
+          preview.textContent = 'Открыть готовый preview';
+          links.append(preview);
+        }
+        if (task.downloadUrl) {
+          const download = document.createElement('a');
+          download.className = 'download-button';
+          download.href = task.downloadUrl;
+          download.download = `MontageAI_${task.taskId}.mp4`;
+          download.textContent = 'Скачать MP4';
+          links.append(download);
+        }
+        card.append(links);
       }
       appendReviewControls(card, task);
       pipelineList.append(card);

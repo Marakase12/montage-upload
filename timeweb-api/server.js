@@ -696,6 +696,16 @@ export function createApp(options = {}) {
           new GetObjectCommand({ Bucket: bucket, Key: status.resultKey }),
           { expiresIn: 15 * 60 },
         );
+        const downloadName = `MontageAI_${safeIdentifier(status.taskId, 'taskId')}.mp4`;
+        status.downloadUrl = await signUrl(
+          s3,
+          new GetObjectCommand({
+            Bucket: bucket,
+            Key: status.resultKey,
+            ResponseContentDisposition: `attachment; filename="${downloadName}"`,
+          }),
+          { expiresIn: 15 * 60 },
+        );
       }
       status.action = actions
         .filter((action) => action.taskId === status.taskId)

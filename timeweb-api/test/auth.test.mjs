@@ -253,6 +253,67 @@ test('создаёт правку и требует отдельное явно�
   assert.equal(approvalWithoutConfirmation.status, 400);
 });
 
+test('даёт отдельную ссылку для скачивания только готового MP4', async (context) => {
+  const jobId = 'web-12345678';
+  const readyId = 'task-ready01';
+  const approvedId = 'task-approved01';
+  const pendingId = 'task-pending01';
+  const statuses = [
+    { jobId, taskId: readyId, state: 'READY_FOR_REVIEW', resultKey: `.results/${jobId}/${readyId}.mp4` },
+    { jobId, taskId: approvedId, state: 'APPROVED', resultKey: `.results/${jobId}/${approvedId}.mp4` },
+    { jobId, taskId: pendingId, state: 'PROCESSING', resultKey: `.results/${jobId}/${pendingId}.mp4` },
+  ];
+  const signed = [];
+  const app = createApp({
+    env: { TOKEN_SECRET: secret, S3_BUCKET: 'test-bucket' },
+    s3: {
+      send: async (command) => {
+        if (command.constructor.name === 'ListObjectsV2Command') {
+          return {
+            Contents: command.input.Prefix.startsWith('.status/')
+              ? statuses.map((status) => ({ Key: `.status/${jobId}/${status.taskId}.json` }))
+              : [],
+          };
+        }
+        if (command.constructor.name === 'GetObjectCommand') {
+          const status = statuses.find((item) => command.input.Key.endsWith(`/${item.taskId}.json`));
+          return { Body: { transformToString: async () => JSON.stringify(status) } };
+        }
+        return {};
+      },
+    },
+    getSignedUrl: async (_s3, command, options) => {
+      signed.push({ input: command.input, options });
+      return `https://storage.example/${signed.length}`;
+    },
+  });
+  const server = app.listen(0, '127.0.0.1');
+  context.after(() => new Promise((resolve) => server.close(resolve)));
+  await new Promise((resolve) => server.once('listening', resolve));
+  const token = signToken({
+    kind: 'job', jobId, source: 'web', exp: Math.floor(Date.now() / 1000) + 60,
+  }, secret);
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/pipeline`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(response.status, 200);
+  const { tasks } = await response.json();
+  for (const taskId of [readyId, approvedId]) {
+    const task = tasks.find((item) => item.taskId === taskId);
+    assert.match(task.previewUrl, /^https:\/\/storage\.example\//);
+    assert.match(task.downloadUrl, /^https:\/\/storage\.example\//);
+    const download = signed.find((item) => item.input.ResponseContentDisposition?.includes(taskId));
+    assert.equal(download.input.Key, `.results/${jobId}/${taskId}.mp4`);
+    assert.equal(download.input.ResponseContentDisposition,
+      `attachment; filename="MontageAI_${taskId}.mp4"`);
+    assert.equal(download.options.expiresIn, 15 * 60);
+  }
+  const pending = tasks.find((item) => item.taskId === pendingId);
+  assert.equal(pending.downloadUrl, undefined);
+  assert.equal(pending.previewUrl, undefined);
+  assert.equal(signed.length, 4);
+});
+
 test('выдаёт разным Telegram-пользователям изолированные ссылки', () => {
   const env = {
     TOKEN_SECRET: secret,
