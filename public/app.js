@@ -398,7 +398,7 @@ async function checkHealth() {
     }
   } catch (error) {
     apiAvailable = false;
-    const staticDemo = window.location.hostname.endsWith('.github.io');
+    const staticDemo = window.location.hostname.endsWith('.github.io') && !apiBase;
     if (staticDemo) {
       serverState.className = 'server-state preview';
       serverState.querySelector('span:last-child').textContent = 'Демо интерфейса';
@@ -416,7 +416,14 @@ async function checkHealth() {
       return;
     }
     serverState.className = 'server-state offline';
-    serverState.querySelector('span:last-child').textContent = error.message;
+    serverState.querySelector('span:last-child').textContent = 'Нет связи с сервером';
+    accessTitle.textContent = 'Облако временно недоступно';
+    accessText.textContent = 'Файл можно выбрать сейчас. Загрузка начнётся после восстановления связи.';
+    orderStatus.className = 'form-status error';
+    orderStatus.textContent = `Timeweb API не отвечает: ${error.message}`;
+    fileInput.disabled = false;
+    dropzone.classList.remove('locked');
+    dropzone.removeAttribute('aria-disabled');
   }
 }
 
