@@ -1,5 +1,6 @@
 const dropzone = document.querySelector('#dropzone');
 const fileInput = document.querySelector('#fileInput');
+const extraFileInput = document.querySelector('#extraFileInput');
 const uploadList = document.querySelector('#uploadList');
 const emptyQueue = document.querySelector('#emptyQueue');
 const template = document.querySelector('#uploadTemplate');
@@ -392,6 +393,7 @@ function addFiles(fileList, startImmediately = true) {
     added.push(createTask(file, startImmediately));
   });
   fileInput.value = '';
+  extraFileInput.value = '';
   return added;
 }
 
@@ -439,6 +441,7 @@ async function checkHealth() {
     if (!tokenReady) {
       setAccessState('locked');
       fileInput.disabled = false;
+      extraFileInput.disabled = false;
       dropzone.classList.remove('locked');
       dropzone.removeAttribute('aria-disabled');
       if (manualTokenEnabled) tokenBox.hidden = false;
@@ -447,6 +450,7 @@ async function checkHealth() {
     } else {
       setAccessState('ready');
       fileInput.disabled = false;
+      extraFileInput.disabled = false;
       dropzone.classList.remove('locked');
       dropzone.removeAttribute('aria-disabled');
       filesSection.hidden = false;
@@ -466,6 +470,7 @@ async function checkHealth() {
       orderStatus.className = 'form-status';
       orderStatus.textContent = 'Для запуска видео нужен адрес Timeweb backend.';
       fileInput.disabled = true;
+      extraFileInput.disabled = true;
       dropzone.classList.add('locked');
       dropzone.setAttribute('aria-disabled', 'true');
       filesSection.hidden = true;
@@ -479,6 +484,7 @@ async function checkHealth() {
     orderStatus.className = 'form-status error';
     orderStatus.textContent = error.message;
     fileInput.disabled = false;
+    extraFileInput.disabled = false;
     dropzone.classList.remove('locked');
     dropzone.removeAttribute('aria-disabled');
   }
@@ -706,6 +712,7 @@ async function handleSelectedFiles(fileList) {
 }
 
 fileInput.addEventListener('change', () => handleSelectedFiles(fileInput.files));
+extraFileInput.addEventListener('change', () => handleSelectedFiles(extraFileInput.files));
 
 for (const eventName of ['dragenter', 'dragover']) {
   dropzone.addEventListener(eventName, (event) => {
