@@ -1,6 +1,6 @@
 # Timeweb Upload API
 
-Backend и пользовательский сайт для App Platform. Посетитель создаёт заявку прямо на сайте, получает изолированную сессию и загружает файлы частями напрямую в Timeweb S3.
+Backend для публичного сайта на GitHub Pages. Посетитель создаёт заявку на сайте, получает изолированную сессию и загружает файлы частями напрямую в Timeweb S3.
 
 ## App Platform
 
@@ -21,9 +21,9 @@ S3_ACCESS_KEY=<ключ дополнительного пользователя 
 S3_SECRET_KEY=<секрет дополнительного пользователя S3>
 TOKEN_SECRET=<длинная случайная строка>
 ADMIN_SECRET=<другая длинная случайная строка>
-ALLOWED_ORIGIN=https://<домен-app-platform>
-PUBLIC_SITE_URL=https://<домен-app-platform>/
-MAX_FILE_SIZE_BYTES=1073741824
+ALLOWED_ORIGIN=https://marakase12.github.io
+PUBLIC_SITE_URL=https://marakase12.github.io/montage-upload/
+MAX_FILE_SIZE_BYTES=5368709120
 CHUNK_SIZE_BYTES=10485760
 DIRECT_FILE_LIMIT_BYTES=20971520
 RETENTION_HOURS=24
@@ -34,7 +34,9 @@ ADMIN_CHAT_ID=<Telegram ID владельца для уведомлений>
 WORKER_SECRET=<отдельная длинная случайная строка для Windows bridge>
 ```
 
-Сайт отдаётся этим же Express-приложением, поэтому отдельный фронтенд-хостинг не нужен. В настройках CORS бакета разрешите домен App Platform, методы `GET`, `PUT`, `HEAD`, заголовки `*` и expose-заголовок `ETag`.
+Публичный сайт размещён на GitHub Pages; `public/config.js` указывает технический домен API. Express также может отдать страницу со своего домена для диагностики. В настройках CORS бакета разрешите origin `https://marakase12.github.io`, методы `GET`, `PUT`, `HEAD`, заголовки `*` и expose-заголовок `ETag`.
+
+После смены домена API проверьте его извне командой `npm run smoke:cloud -- https://<домен-api>` из корня репозитория. Проверка создаёт отдельную заявку и загружает маленький синтетический текстовый файл; личные медиа не используются. Зелёный healthcheck в App Platform проверяет только локальный процесс и не заменяет этот тест.
 
 Сервер каждый час удаляет объекты и незавершённые multipart-загрузки старше `RETENTION_HOURS`. Ручной запуск: `POST /api/admin/cleanup`.
 
