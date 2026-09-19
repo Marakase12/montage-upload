@@ -109,25 +109,33 @@ function requestHeaders(extra = {}) {
 }
 
 async function api(url, options = {}) {
-  let response;
+  const { timeoutMs = 30000, ...fetchOptions } = options;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    response = await fetch(`${apiBase}${url}`, {
-      ...options,
-      headers: requestHeaders(options.headers ?? {}),
+    const response = await fetch(`${apiBase}${url}`, {
+      ...fetchOptions,
+      headers: requestHeaders(fetchOptions.headers ?? {}),
+      signal: controller.signal,
     });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(payload.error ?? `Ошибка сервера: ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    return payload;
   } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`Timeweb API не ответил за ${Math.round(timeoutMs / 1000)} сек. Операция не подтверждена.`, { cause: error });
+    }
     if (error instanceof TypeError) {
       throw new Error('Нет ответа от Timeweb API. Возможна проблема сервиса или сети; попробуйте ещё раз позже.', { cause: error });
     }
     throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload.error ?? `Ошибка сервера: ${response.status}`);
-    error.status = response.status;
-    throw error;
-  }
-  return payload;
 }
 
 function fileKind(name) {
@@ -274,6 +282,7 @@ async function uploadFile(task) {
     setCardState(task, 'finalizing', 'Передача завершена · проверяем файл и запускаем обработку…');
     const result = await api(`/api/uploads/${encodeURIComponent(session.uploadId)}/complete`, {
       method: 'POST',
+      timeoutMs: 120000,
       headers: {
         'Content-Type': 'application/json',
         ...(task.sessionToken ? { 'X-Upload-Session': task.sessionToken } : {}),
@@ -404,7 +413,7 @@ function showPendingConnectionError(message) {
 
 async function checkHealth() {
   try {
-    const health = await api('/api/health');
+    const health = await api('/api/health', { timeoutMs: 8000 });
     apiAvailable = true;
     serverProtected = health.protected;
     serverState.className = 'server-state online';
@@ -741,6 +750,7 @@ async function createProject() {
   try {
     const result = await api('/api/jobs', {
       method: 'POST',
+      timeoutMs: 15000,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         quickStart: true,
