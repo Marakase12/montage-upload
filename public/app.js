@@ -39,6 +39,14 @@ const pipelineSection = document.querySelector('#pipelineSection');
 const pipelineList = document.querySelector('#pipelineList');
 const refreshPipeline = document.querySelector('#refreshPipeline');
 const queueSection = document.querySelector('.queue-section');
+const settingsDialog = document.querySelector('#settingsDialog');
+const previewDialog = document.querySelector('#previewDialog');
+const previewVideo = document.querySelector('#previewVideo');
+const revisionDialog = document.querySelector('#revisionDialog');
+const revisionText = document.querySelector('#revisionText');
+const revisionStatus = document.querySelector('#revisionStatus');
+const revisionSubmit = document.querySelector('#revisionSubmit');
+let revisionTask = null;
 
 const tasks = new Set();
 const config = window.MONTAGE_UPLOAD_CONFIG ?? {};
@@ -145,7 +153,9 @@ function fileKind(name) {
 }
 
 function updateEmptyState() {
-  emptyQueue.hidden = uploadList.children.length > 0;
+  const hasUploads = uploadList.children.length > 0;
+  emptyQueue.hidden = hasUploads;
+  queueSection.hidden = !hasUploads;
 }
 
 function setCardState(task, state, message) {
@@ -343,7 +353,7 @@ function createTask(file, startImmediately = true) {
     }
     if (task.state === 'error') {
       if (!uploadToken) {
-        setCardState(task, 'queued', 'Ожидает подключения к Timeweb. Нажмите «Продолжить к загрузке».');
+        setCardState(task, 'queued', 'Ожидает подключения к Timeweb. Нажмите «Продолжить загрузку».');
         if (!pendingTasks.includes(task)) pendingTasks.push(task);
         orderSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
         return;
@@ -385,9 +395,12 @@ function addFiles(fileList, startImmediately = true) {
       card.querySelector('.file-meta').textContent = formatBytes(file.size);
       card.querySelector('.file-status').textContent = `Файл больше лимита ${formatBytes(maxFileSize)}`;
       card.querySelector('.file-percent').textContent = '—';
-      card.querySelector('.cancel-button').addEventListener('click', () => card.remove());
+      card.querySelector('.cancel-button').addEventListener('click', () => {
+        card.remove();
+        updateEmptyState();
+      });
       uploadList.append(card);
-      emptyQueue.hidden = true;
+      updateEmptyState();
       return;
     }
     added.push(createTask(file, startImmediately));
@@ -446,6 +459,7 @@ async function checkHealth() {
       dropzone.removeAttribute('aria-disabled');
       if (manualTokenEnabled) tokenBox.hidden = false;
       filesSection.hidden = true;
+      pipelineSection.hidden = true;
       orderSection.hidden = false;
     } else {
       setAccessState('ready');
@@ -455,12 +469,13 @@ async function checkHealth() {
       dropzone.removeAttribute('aria-disabled');
       filesSection.hidden = false;
       orderSection.hidden = true;
-      pipelineSection.hidden = false;
+      // The processing panel appears only after a real pipeline task exists.
     }
   } catch (error) {
     apiAvailable = false;
     const staticDemo = window.location.hostname.endsWith('.github.io') && !apiBase;
     if (staticDemo) {
+      accessBanner.dataset.state = 'preview';
       serverState.className = 'server-state preview';
       serverState.querySelector('span:last-child').textContent = 'Демо интерфейса';
       accessTitle.textContent = 'Публичное демо MontageAI';
@@ -478,9 +493,10 @@ async function checkHealth() {
       return;
     }
     serverState.className = 'server-state offline';
+    accessBanner.dataset.state = 'error';
     serverState.querySelector('span:last-child').textContent = 'Нет связи с сервером';
     accessTitle.textContent = 'Облако временно недоступно';
-    accessText.textContent = 'Файл можно выбрать сейчас. Когда связь восстановится, нажмите «Продолжить к загрузке».';
+    accessText.textContent = 'Файл можно выбрать сейчас. Когда связь восстановится, нажмите «Продолжить загрузку».';
     orderStatus.className = 'form-status error';
     orderStatus.textContent = error.message;
     fileInput.disabled = false;
@@ -543,10 +559,12 @@ async function sendPipelineAction(task, payload, statusNode, controls) {
       ? 'Подтверждение принято. Проверяю и фиксирую final.mp4…'
       : 'Правка принята. Новый preview появится здесь автоматически.';
     await loadPipeline();
+    return true;
   } catch (error) {
     statusNode.className = 'review-status error';
     statusNode.textContent = error.message;
     controls.forEach((control) => { control.disabled = false; });
+    return false;
   }
 }
 
@@ -555,24 +573,17 @@ function appendReviewControls(card, task) {
   const actionBusy = ['PENDING', 'PROCESSING'].includes(task.action?.state);
   const panel = document.createElement('div');
   panel.className = 'review-actions';
-  const heading = document.createElement('strong');
-  heading.textContent = 'Управление роликом';
-  const textarea = document.createElement('textarea');
-  textarea.maxLength = 500;
-  textarea.rows = 3;
-  textarea.placeholder = 'Например: сделай музыку тише, текст ниже и переделай хук';
-  textarea.disabled = actionBusy;
   const buttons = document.createElement('div');
   buttons.className = 'review-buttons';
   const revise = document.createElement('button');
   revise.type = 'button';
   revise.className = 'secondary-button';
-  revise.textContent = 'Применить правку';
+  revise.textContent = 'Изменить';
   revise.disabled = actionBusy;
   const approve = document.createElement('button');
   approve.type = 'button';
   approve.className = 'approve-button';
-  approve.textContent = 'Всё хорошо — подтвердить';
+  approve.textContent = 'Подтвердить ролик';
   approve.disabled = actionBusy || task.state === 'APPROVED';
   const status = document.createElement('p');
   status.className = 'review-status';
@@ -588,13 +599,11 @@ function appendReviewControls(card, task) {
     status.textContent = '✅ Final зафиксирован. Публикация не запускалась.';
   }
   revise.addEventListener('click', () => {
-    const requestText = textarea.value.trim();
-    if (!requestText) {
-      status.className = 'review-status error';
-      status.textContent = 'Сначала напиши, что изменить.';
-      return;
-    }
-    sendPipelineAction(task, { kind: 'REVISION', requestText }, status, [textarea, revise, approve]);
+    revisionTask = task;
+    revisionText.value = '';
+    revisionStatus.textContent = '';
+    revisionDialog.showModal();
+    revisionText.focus();
   });
   approve.addEventListener('click', () => {
     const confirmed = window.confirm(
@@ -605,11 +614,11 @@ function appendReviewControls(card, task) {
       task,
       { kind: 'APPROVE', confirmation: 'APPROVE' },
       status,
-      [textarea, revise, approve],
+      [revise, approve],
     );
   });
   buttons.append(revise, approve);
-  panel.append(heading, textarea, buttons, status);
+  panel.append(buttons, status);
   card.append(panel);
 }
 
@@ -619,12 +628,10 @@ async function loadPipeline() {
     const result = await api('/api/pipeline');
     pipelineList.replaceChildren();
     if (!result.tasks.length) {
-      const empty = document.createElement('p');
-      empty.className = 'files-empty';
-      empty.textContent = 'После загрузки видео здесь появятся стадии обработки.';
-      pipelineList.append(empty);
+      pipelineSection.hidden = true;
       return;
     }
+    pipelineSection.hidden = false;
     result.tasks.forEach((task) => {
       const card = document.createElement('article');
       card.className = `pipeline-card state-${String(task.state).toLowerCase()}`;
@@ -668,12 +675,14 @@ async function loadPipeline() {
         const links = document.createElement('div');
         links.className = 'result-links';
         if (task.previewUrl) {
-          const preview = document.createElement('a');
+          const preview = document.createElement('button');
+          preview.type = 'button';
           preview.className = 'preview-button';
-          preview.href = task.previewUrl;
-          preview.target = '_blank';
-          preview.rel = 'noopener';
-          preview.textContent = 'Открыть готовый preview';
+          preview.textContent = 'Смотреть ролик';
+          preview.addEventListener('click', () => {
+            previewVideo.src = task.previewUrl;
+            previewDialog.showModal();
+          });
           links.append(preview);
         }
         if (task.downloadUrl) {
@@ -690,6 +699,7 @@ async function loadPipeline() {
       pipelineList.append(card);
     });
   } catch (error) {
+    pipelineSection.hidden = false;
     pipelineList.textContent = error.message;
   }
 }
@@ -702,7 +712,7 @@ async function handleSelectedFiles(fileList) {
     pendingTasks.push(...addFiles(selectedFiles, false));
     if (!projectConsent.checked) {
       orderStatus.className = 'form-status error';
-      orderStatus.textContent = 'Файл выбран. Подтвердите временное хранение и нажмите «Продолжить к загрузке».';
+      orderStatus.textContent = 'Файл выбран. Отметьте согласие на временное хранение — загрузка начнётся автоматически.';
       orderSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
@@ -714,6 +724,7 @@ async function handleSelectedFiles(fileList) {
     } catch (error) {
       orderStatus.className = 'form-status error';
       orderStatus.textContent = error.message;
+      orderSubmit.hidden = false;
       showPendingConnectionError(error.message);
       return;
     }
@@ -726,6 +737,59 @@ async function handleSelectedFiles(fileList) {
 
 fileInput.addEventListener('change', () => handleSelectedFiles(fileInput.files));
 extraFileInput.addEventListener('change', () => handleSelectedFiles(extraFileInput.files));
+document.querySelectorAll('.mode-option').forEach((button) => {
+  button.addEventListener('click', () => {
+    processingMode.value = button.dataset.mode;
+    document.querySelectorAll('.mode-option').forEach((option) => {
+      const selected = option === button;
+      option.classList.toggle('selected', selected);
+      option.setAttribute('aria-pressed', String(selected));
+    });
+  });
+});
+document.querySelector('#openSettings').addEventListener('click', () => settingsDialog.showModal());
+document.querySelectorAll('[data-close-dialog]').forEach((button) => {
+  button.addEventListener('click', () => button.closest('dialog').close());
+});
+previewDialog.addEventListener('close', () => {
+  previewVideo.pause();
+  previewVideo.removeAttribute('src');
+  previewVideo.load();
+});
+document.querySelectorAll('[data-suggestion]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const suggestion = button.dataset.suggestion;
+    revisionText.value = revisionText.value.trim()
+      ? `${revisionText.value.trim()}, ${suggestion.toLowerCase()}`
+      : suggestion;
+    revisionText.focus();
+  });
+});
+revisionSubmit.addEventListener('click', async () => {
+  const requestText = revisionText.value.trim();
+  if (!revisionTask || !requestText) {
+    revisionStatus.className = 'review-status error';
+    revisionStatus.textContent = 'Напишите, что нужно изменить.';
+    return;
+  }
+  const accepted = await sendPipelineAction(
+    revisionTask,
+    { kind: 'REVISION', requestText },
+    revisionStatus,
+    [revisionSubmit, revisionText],
+  );
+  if (accepted) revisionDialog.close();
+});
+projectConsent.addEventListener('change', async () => {
+  if (!projectConsent.checked || !pendingTasks.length || uploadToken || creatingProject) return;
+  try {
+    await createProject();
+    startPendingTasks();
+  } catch (error) {
+    orderSubmit.hidden = false;
+    showPendingConnectionError(error.message);
+  }
+});
 
 for (const eventName of ['dragenter', 'dragover']) {
   dropzone.addEventListener(eventName, (event) => {
@@ -784,11 +848,13 @@ async function createProject() {
     sessionStorage.setItem('montage-upload-link-token', uploadToken);
     orderStatus.className = 'form-status success';
     orderStatus.textContent = 'Проект создан. Открываем загрузку…';
+    orderSubmit.hidden = true;
     void Promise.allSettled([checkHealth(), loadFiles(), loadPipeline()]);
     if (!pendingTasks.length) dropzone.scrollIntoView({ behavior: 'smooth', block: 'center' });
   } catch (error) {
     orderStatus.className = 'form-status error';
     orderStatus.textContent = error.message;
+    orderSubmit.hidden = false;
     throw error;
   } finally {
     creatingProject = false;
