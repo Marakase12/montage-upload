@@ -36,6 +36,7 @@ NODE_ENV=production
 DATABASE_URL=postgresql://<user>:<password>@<host>:<port>/<database>
 DATABASE_SSL=require
 DATABASE_SSL_REJECT_UNAUTHORIZED=true
+DATABASE_SSL_CA_PATH=certs/timeweb-dbaas-ca.crt
 DATABASE_POOL_SIZE=10
 AUTH_PASSWORD_PEPPER=<отдельная длинная случайная строка>
 SESSION_AUDIT_SECRET=<отдельная длинная случайная строка>
@@ -79,6 +80,11 @@ runner (`npm run migrate`). Он применяет SQL-файлы из `migrati
 непромигрированной PostgreSQL он возвращает HTTP 503 и
 `accountsEnabled: false`. Без `DATABASE_URL` guest-flow остаётся healthy, а
 аккаунты явно отключены.
+
+Для Timeweb DBaaS оставляйте проверку TLS включённой и указывайте
+`DATABASE_SSL_CA_PATH=certs/timeweb-dbaas-ca.crt`. Файл содержит публичный
+корневой сертификат, скачанный из вкладки «Подключение» кластера Timeweb.
+Не заменяйте это на `DATABASE_SSL_REJECT_UNAUTHORIZED=false` в production.
 
 Лимиты регистрации, входа и создания проектов хранятся в PostgreSQL, поэтому не
 сбрасываются при рестарте и работают между экземплярами сервиса. Memory-store

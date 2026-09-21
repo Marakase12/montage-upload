@@ -1,4 +1,6 @@
 import pg from 'pg';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 const { Pool } = pg;
 const KNOWN_NODE_ENV = new Set(['development', 'test', 'production']);
@@ -42,7 +44,13 @@ export function postgresSsl(env = process.env) {
   const sslMode = String(env.DATABASE_SSL ?? '').trim().toLowerCase();
   if (sslMode === 'disable') return false;
   if (sslMode === 'require') {
-    return { rejectUnauthorized: String(env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? 'true') !== 'false' };
+    const rejectUnauthorized = String(env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? 'true') !== 'false';
+    const caPath = String(env.DATABASE_SSL_CA_PATH ?? '').trim();
+    const ca = caPath ? readFileSync(path.resolve(caPath), 'utf8').trim() : undefined;
+    return {
+      rejectUnauthorized,
+      ...(ca ? { ca } : {}),
+    };
   }
   return undefined;
 }

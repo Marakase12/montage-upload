@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   MemoryAccountStore,
   PostgresAccountStore,
@@ -8,7 +9,7 @@ import {
   hashSessionToken,
   verifyPassword,
 } from '../accounts.js';
-import { validateAccountEnvironment } from '../postgres.js';
+import { postgresSsl, validateAccountEnvironment } from '../postgres.js';
 import { createApp, signToken, verifyToken } from '../server.js';
 
 const tokenSecret = 'test-token-secret-that-is-long-enough';
@@ -413,4 +414,16 @@ test('production account config требует явный NODE_ENV и разны
     () => validateAccountEnvironment({ ACCOUNT_STORE: 'memory', NODE_ENV: 'production' }),
     /allowed only/,
   );
+});
+
+test('PostgreSQL TLS загружает официальный CA и сохраняет проверку сертификата', () => {
+  const caPath = fileURLToPath(new URL('../certs/timeweb-dbaas-ca.crt', import.meta.url));
+  const ssl = postgresSsl({
+    DATABASE_SSL: 'require',
+    DATABASE_SSL_REJECT_UNAUTHORIZED: 'true',
+    DATABASE_SSL_CA_PATH: caPath,
+  });
+  assert.equal(ssl.rejectUnauthorized, true);
+  assert.match(ssl.ca, /BEGIN CERTIFICATE/);
+  assert.match(ssl.ca, /END CERTIFICATE/);
 });
