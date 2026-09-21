@@ -5,8 +5,10 @@ import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
+  DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   ListMultipartUploadsCommand,
   ListPartsCommand,
@@ -17,12 +19,34 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import express from 'express';
+import {
+  AccountError,
+  AccountRateLimitError,
+  AccountService,
+  MemoryAccountStore,
+  SESSION_COOKIE_NAME,
+  createPostgresAccountStore,
+  hashAuditValue,
+  parseCookies,
+  serializeExpiredSessionCookie,
+  serializeSessionCookie,
+} from './accounts.js';
+import { validateAccountEnvironment } from './postgres.js';
 
 const DEFAULT_MAX_FILE_SIZE = 1024 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE = 10 * 1024 * 1024;
 const DEFAULT_DIRECT_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_LINK_LIFETIME_HOURS = 24;
 const DEFAULT_RETENTION_HOURS = 24;
+const DEFAULT_AUTH_REGISTER_LIMIT = 5;
+const DEFAULT_AUTH_REGISTER_WINDOW_SECONDS = 60 * 60;
+const DEFAULT_AUTH_LOGIN_LIMIT = 10;
+const DEFAULT_AUTH_LOGIN_IP_LIMIT = 30;
+const DEFAULT_AUTH_LOGIN_WINDOW_SECONDS = 15 * 60;
+const DEFAULT_ACCOUNT_PROJECT_LIMIT = 20;
+const DEFAULT_ACCOUNT_PROJECT_WINDOW_SECONDS = 60 * 60;
+const DEFAULT_ACCOUNT_PROJECT_QUOTA = 200;
+const DEFAULT_RATE_LIMIT_RETENTION_HOURS = 7 * 24;
 const PROCESSABLE_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv']);
 export function isProcessableVideoFile(name) {
   return PROCESSABLE_VIDEO_EXTENSIONS.has(path.extname(name).toLowerCase());
@@ -113,7 +137,9 @@ function bearer(request) {
 }
 
 function allowedOrigins(env) {
-  return String(env.ALLOWED_ORIGIN ?? '')
+  return [env.ALLOWED_ORIGIN, env.ACCOUNT_ALLOWED_ORIGIN]
+    .filter(Boolean)
+    .join(',')
     .split(',')
     .map((value) => value.trim().replace(/\/$/, ''))
     .filter(Boolean);
@@ -219,6 +245,31 @@ async function putJson(s3, bucket, key, payload) {
     Body: JSON.stringify(payload, null, 2),
     ContentType: 'application/json; charset=utf-8',
   }));
+}
+
+async function putProjectBrief(s3, bucket, brief) {
+  await s3.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: `.briefs/${safeIdentifier(brief.jobId, 'jobId')}.json`,
+    Body: JSON.stringify(brief, null, 2),
+    ContentType: 'application/json; charset=utf-8',
+    Metadata: {
+      jobid: brief.jobId,
+      source: brief.source === 'account' ? 'account' : 'website',
+    },
+  }));
+}
+
+async function removeProjectBrief(s3, bucket, jobId) {
+  try {
+    await s3.send(new DeleteObjectCommand({
+      Bucket: bucket,
+      Key: `.briefs/${safeIdentifier(jobId, 'jobId')}.json`,
+    }));
+  } catch (error) {
+    const code = String(error?.name ?? error?.code ?? 'UNKNOWN').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+    console.error(`Project brief rollback failed (${code || 'UNKNOWN'})`);
+  }
 }
 
 function createS3(env) {
@@ -373,6 +424,74 @@ export function createWebUploadAccess(env, now = Math.floor(Date.now() / 1000), 
   };
 }
 
+function createAccountJobAccess(project, env, now = Math.floor(Date.now() / 1000)) {
+  const lifetimeHours = integer(env.UPLOAD_LINK_LIFETIME_HOURS, DEFAULT_LINK_LIFETIME_HOURS);
+  const job = {
+    kind: 'job',
+    jobId: project.jobId,
+    userId: project.userId,
+    source: 'account',
+    processing: processingOptions(project.processing),
+    iat: now,
+    exp: now + lifetimeHours * 60 * 60,
+  };
+  return {
+    job,
+    token: signToken(job, env.TOKEN_SECRET),
+    lifetimeHours,
+    expiresAt: new Date(job.exp * 1000).toISOString(),
+  };
+}
+
+function publicProject(project) {
+  return {
+    id: project.id,
+    jobId: project.jobId,
+    title: project.title,
+    source: project.source,
+    processing: processingOptions(project.processing),
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+  };
+}
+
+function projectTitle(value) {
+  return shortText(value, 120) || 'Новый проект';
+}
+
+function accountCookieToken(request) {
+  return parseCookies(request.headers.cookie).get(SESSION_COOKIE_NAME) ?? '';
+}
+
+function accountRequestMetadata(request, env) {
+  return {
+    userAgent: request.headers['user-agent'] ?? '',
+    ipHash: hashAuditValue(
+      request.ip || request.socket.remoteAddress || '',
+      env.SESSION_AUDIT_SECRET || env.TOKEN_SECRET,
+    ),
+  };
+}
+
+function projectBrief(access, input, options = {}) {
+  const processing = processingOptions(input?.processing ?? options.processing);
+  return {
+    version: 1,
+    jobId: access.job.jobId,
+    source: options.source === 'account' ? 'account' : 'website',
+    accountUserId: options.accountUserId ?? null,
+    title: projectTitle(input?.title ?? input?.projectTitle),
+    customerName: shortText(input?.customerName, 80) || options.defaultCustomerName || null,
+    contact: shortText(input?.contact, 120) || null,
+    projectType: shortText(input?.projectType, 40) || 'other',
+    comment: shortText(input?.comment, 1000),
+    processing,
+    quickStart: input?.quickStart === true,
+    createdAt: options.createdAt ?? new Date().toISOString(),
+    expiresAt: access.expiresAt,
+  };
+}
+
 function shortText(value, maxLength) {
   return String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, maxLength);
 }
@@ -395,13 +514,56 @@ export function createApp(options = {}) {
   const s3 = options.s3 ?? createS3(env);
   const signUrl = options.getSignedUrl ?? getSignedUrl;
   const bucket = env.S3_BUCKET;
+  const configuredAccountStore = String(env.ACCOUNT_STORE ?? '').trim().toLowerCase();
+  if (!Object.hasOwn(options, 'accountStore')) validateAccountEnvironment(env);
+  const accountStore = Object.hasOwn(options, 'accountStore')
+    ? options.accountStore
+    : configuredAccountStore === 'memory'
+      ? new MemoryAccountStore({ maxRateLimitEntries: integer(env.MEMORY_RATE_LIMIT_MAX_KEYS, 10_000) })
+      : createPostgresAccountStore(env);
+  const accountService = options.accountService ?? (accountStore ? new AccountService({
+    store: accountStore,
+    passwordPepper: env.AUTH_PASSWORD_PEPPER,
+    sessionLifetimeSeconds: integer(env.SESSION_LIFETIME_HOURS, 30 * 24) * 60 * 60,
+    ...(options.now ? { now: options.now } : {}),
+  }) : null);
   const app = express();
   const jobRequests = new Map();
+  const accountRateLimits = {
+    register: {
+      limit: integer(env.AUTH_REGISTER_RATE_LIMIT, DEFAULT_AUTH_REGISTER_LIMIT),
+      windowSeconds: integer(env.AUTH_REGISTER_RATE_WINDOW_SECONDS, DEFAULT_AUTH_REGISTER_WINDOW_SECONDS),
+    },
+    login: {
+      limit: integer(env.AUTH_LOGIN_RATE_LIMIT, DEFAULT_AUTH_LOGIN_LIMIT),
+      windowSeconds: integer(env.AUTH_LOGIN_RATE_WINDOW_SECONDS, DEFAULT_AUTH_LOGIN_WINDOW_SECONDS),
+    },
+    loginIp: {
+      limit: integer(env.AUTH_LOGIN_IP_RATE_LIMIT, DEFAULT_AUTH_LOGIN_IP_LIMIT),
+      windowSeconds: integer(env.AUTH_LOGIN_RATE_WINDOW_SECONDS, DEFAULT_AUTH_LOGIN_WINDOW_SECONDS),
+    },
+    project: {
+      limit: integer(env.ACCOUNT_PROJECT_RATE_LIMIT, DEFAULT_ACCOUNT_PROJECT_LIMIT),
+      windowSeconds: integer(env.ACCOUNT_PROJECT_RATE_WINDOW_SECONDS, DEFAULT_ACCOUNT_PROJECT_WINDOW_SECONDS),
+    },
+  };
+  const accountProjectQuota = integer(env.ACCOUNT_PROJECT_QUOTA, DEFAULT_ACCOUNT_PROJECT_QUOTA);
+  const rateLimitRetentionSeconds = integer(
+    env.RATE_LIMIT_RETENTION_HOURS,
+    DEFAULT_RATE_LIMIT_RETENTION_HOURS,
+  ) * 60 * 60;
 
   app.disable('x-powered-by');
-  app.set('trust proxy', true);
+  app.set('trust proxy', env.TRUST_PROXY_HOPS ? integer(env.TRUST_PROXY_HOPS, 1) : false);
   app.use(express.json({ limit: '64kb' }));
   app.use((request, response, next) => {
+    response.setHeader('X-Content-Type-Options', 'nosniff');
+    response.setHeader('X-Frame-Options', 'DENY');
+    response.setHeader('Referrer-Policy', 'no-referrer');
+    response.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    if (env.NODE_ENV === 'production') {
+      response.setHeader('Strict-Transport-Security', 'max-age=31536000');
+    }
     const origin = request.headers.origin?.replace(/\/$/, '');
     const allowed = allowedOrigins(env);
     let sameOrigin = false;
@@ -416,7 +578,10 @@ export function createApp(options = {}) {
       next(new HttpError(403, 'Этот сайт не разрешён'));
       return;
     }
-    if (origin) response.setHeader('Access-Control-Allow-Origin', origin);
+    if (origin) {
+      response.setHeader('Access-Control-Allow-Origin', origin);
+      response.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
     response.setHeader('Vary', 'Origin');
     response.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Upload-Session');
@@ -443,6 +608,251 @@ export function createApp(options = {}) {
     return { job, session };
   };
 
+  const requireAccount = async (request) => {
+    if (!accountService) throw new HttpError(503, 'Личные кабинеты ещё не подключены');
+    const authenticated = await accountService.authenticate(accountCookieToken(request));
+    if (!authenticated) throw new HttpError(401, 'Войдите в личный кабинет');
+    return authenticated;
+  };
+
+  const accountReadiness = async () => {
+    if (!accountService || !accountStore) return { ready: false, backend: null, schemaVersion: null };
+    if (typeof accountStore.readiness !== 'function') {
+      return { ready: true, backend: 'injected', schemaVersion: null };
+    }
+    try {
+      return await accountStore.readiness();
+    } catch {
+      return { ready: false, backend: 'postgres', schemaVersion: null };
+    }
+  };
+
+  const enforceAccountRateLimit = async (scope, subjects, settings) => {
+    if (!accountStore?.consumeRateLimit) return;
+    const uniqueSubjects = [...new Set(subjects.filter(Boolean))];
+    for (const subjectHash of uniqueSubjects) {
+      const result = await accountStore.consumeRateLimit({
+        scope,
+        subjectHash,
+        limit: settings.limit,
+        windowSeconds: settings.windowSeconds,
+        retentionSeconds: rateLimitRetentionSeconds,
+        now: options.now ? options.now() : new Date(),
+      });
+      if (!result.allowed) {
+        throw new AccountRateLimitError('Слишком много попыток. Попробуйте позже', result.retryAfterSeconds);
+      }
+    }
+  };
+
+  const rateLimitSubjects = (request) => {
+    const secret = env.SESSION_AUDIT_SECRET || env.TOKEN_SECRET;
+    const ip = request.ip || request.socket.remoteAddress || 'unknown';
+    const identity = String(request.body?.email ?? '').trim().toLowerCase().slice(0, 254);
+    return {
+      ip: hashAuditValue(`ip:${ip}`, secret),
+      identity: identity ? hashAuditValue(`email:${identity}`, secret) : null,
+      ipIdentity: identity ? hashAuditValue(`ip-email:${ip}:${identity}`, secret) : null,
+    };
+  };
+
+  const enforceProjectCreationLimit = async (userId) => {
+    await enforceAccountRateLimit(
+      'account_project_create',
+      [hashAuditValue(`user:${userId}`, env.SESSION_AUDIT_SECRET || env.TOKEN_SECRET)],
+      accountRateLimits.project,
+    );
+  };
+
+  const findOwnedProject = async (identifier, userId) => {
+    const project = await accountStore.findProjectForUser(identifier, userId);
+    if (project || !accountStore.findProjectByJobIdForUser) return project;
+    return accountStore.findProjectByJobIdForUser(identifier, userId);
+  };
+
+  const assertAccountMutationOrigin = (request) => {
+    const origin = request.headers.origin?.replace(/\/$/, '');
+    const fetchSite = String(request.headers['sec-fetch-site'] ?? '').toLowerCase();
+    if (!origin) {
+      if (fetchSite && !['same-origin', 'none'].includes(fetchSite)) {
+        throw new HttpError(403, 'Запрос с этого сайта запрещён');
+      }
+      return;
+    }
+    let sameOrigin = false;
+    try {
+      sameOrigin = new URL(origin).host === request.headers.host;
+    } catch {
+      sameOrigin = false;
+    }
+    const accountOrigins = String(env.ACCOUNT_ALLOWED_ORIGIN ?? '')
+      .split(',')
+      .map((value) => value.trim().replace(/\/$/, ''))
+      .filter(Boolean);
+    if (!sameOrigin && !accountOrigins.includes(origin)) {
+      throw new HttpError(403, 'Личный кабинет доступен только с доверенного сайта');
+    }
+  };
+
+  const setAccountSession = (response, result) => {
+    response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('Set-Cookie', serializeSessionCookie(result.token, result.expiresAt));
+  };
+
+  app.get('/api/auth/capabilities', asyncRoute(async (request, response) => {
+    const readiness = await accountReadiness();
+    response.setHeader('Cache-Control', 'no-store');
+    response.json({
+      ok: true,
+      configured: Boolean(accountService),
+      enabled: Boolean(accountService) && readiness.ready,
+      authEnabled: Boolean(accountService) && readiness.ready,
+      registrationEnabled: Boolean(accountService) && readiness.ready,
+      sameOriginCookie: true,
+    });
+  }));
+
+  app.post('/api/auth/register', asyncRoute(async (request, response) => {
+    if (!accountService) throw new HttpError(503, 'Личные кабинеты ещё не подключены');
+    assertAccountMutationOrigin(request);
+    const subjects = rateLimitSubjects(request);
+    await enforceAccountRateLimit('auth_register_ip', [subjects.ip], accountRateLimits.register);
+    await enforceAccountRateLimit('auth_register_identity', [subjects.identity], accountRateLimits.register);
+    const result = await accountService.register(request.body, accountRequestMetadata(request, env));
+    setAccountSession(response, result);
+    response.status(201).json({ ok: true, user: result.user });
+  }));
+
+  app.post('/api/auth/login', asyncRoute(async (request, response) => {
+    if (!accountService) throw new HttpError(503, 'Личные кабинеты ещё не подключены');
+    assertAccountMutationOrigin(request);
+    const subjects = rateLimitSubjects(request);
+    await enforceAccountRateLimit('auth_login_ip', [subjects.ip], accountRateLimits.loginIp);
+    await enforceAccountRateLimit('auth_login_ip_identity', [subjects.ipIdentity], accountRateLimits.login);
+    const result = await accountService.login(request.body, accountRequestMetadata(request, env));
+    setAccountSession(response, result);
+    response.json({ ok: true, user: result.user });
+  }));
+
+  app.get(['/api/me', '/api/auth/me'], asyncRoute(async (request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
+    const { user } = await requireAccount(request);
+    response.json({ ok: true, user });
+  }));
+
+  app.post('/api/auth/logout', asyncRoute(async (request, response) => {
+    if (!accountService) throw new HttpError(503, 'Личные кабинеты ещё не подключены');
+    assertAccountMutationOrigin(request);
+    await accountService.logout(accountCookieToken(request));
+    response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('Set-Cookie', serializeExpiredSessionCookie());
+    response.json({ ok: true });
+  }));
+
+  app.get('/api/projects', asyncRoute(async (request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
+    const { user } = await requireAccount(request);
+    const projects = await accountStore.listProjects(user.id);
+    response.json({ ok: true, projects: projects.map(publicProject) });
+  }));
+
+  app.post('/api/projects', asyncRoute(async (request, response) => {
+    if (!bucket) throw new Error('S3_BUCKET is not configured');
+    assertAccountMutationOrigin(request);
+    const { user } = await requireAccount(request);
+    await enforceProjectCreationLimit(user.id);
+    const now = new Date();
+    const pendingProject = {
+      id: crypto.randomUUID(),
+      userId: user.id,
+      jobId: `web-${crypto.randomUUID()}`,
+      title: projectTitle(request.body?.title),
+      source: 'account',
+      processing: processingOptions(request.body?.processing),
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+    const access = createAccountJobAccess(pendingProject, env, Math.floor(now.getTime() / 1000));
+    const brief = projectBrief(access, request.body, {
+      source: 'account',
+      accountUserId: user.id,
+      defaultCustomerName: user.displayName,
+      processing: pendingProject.processing,
+      createdAt: now.toISOString(),
+    });
+    await putProjectBrief(s3, bucket, brief);
+    let project;
+    try {
+      project = await accountStore.createProject(pendingProject, { quota: accountProjectQuota });
+    } catch (error) {
+      await removeProjectBrief(s3, bucket, pendingProject.jobId);
+      throw error;
+    }
+    response.setHeader('Cache-Control', 'no-store');
+    response.status(201).json({
+      ok: true,
+      project: publicProject(project),
+      jobToken: access.token,
+      token: access.token,
+      jobTokenExpiresAt: access.expiresAt,
+    });
+  }));
+
+  app.post('/api/projects/claim', asyncRoute(async (request, response) => {
+    assertAccountMutationOrigin(request);
+    const { user } = await requireAccount(request);
+    await enforceProjectCreationLimit(user.id);
+    const legacyToken = String(request.body?.jobToken ?? request.body?.legacyToken ?? '');
+    const legacyJob = verifyToken(legacyToken, env.TOKEN_SECRET, 'job');
+    const jobId = safeIdentifier(legacyJob.jobId, 'jobId');
+    const now = new Date();
+    const project = await accountStore.claimProject({
+      id: crypto.randomUUID(),
+      userId: user.id,
+      jobId,
+      title: projectTitle(request.body?.title),
+      source: 'legacy_claim',
+      processing: processingOptions(legacyJob.processing),
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    }, { quota: accountProjectQuota });
+    const access = createAccountJobAccess(project, env, Math.floor(now.getTime() / 1000));
+    response.setHeader('Cache-Control', 'no-store');
+    response.status(project.claimCreated ? 201 : 200).json({
+      ok: true,
+      project: publicProject(project),
+      jobToken: access.token,
+      token: access.token,
+      jobTokenExpiresAt: access.expiresAt,
+    });
+  }));
+
+  app.get('/api/projects/:projectId', asyncRoute(async (request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
+    const { user } = await requireAccount(request);
+    const projectId = safeIdentifier(request.params.projectId, 'projectId');
+    const project = await findOwnedProject(projectId, user.id);
+    if (!project) throw new HttpError(404, 'Проект не найден');
+    response.json({ ok: true, project: publicProject(project) });
+  }));
+
+  app.post('/api/projects/:projectId/access', asyncRoute(async (request, response) => {
+    assertAccountMutationOrigin(request);
+    const { user } = await requireAccount(request);
+    const projectId = safeIdentifier(request.params.projectId, 'projectId');
+    const project = await findOwnedProject(projectId, user.id);
+    if (!project) throw new HttpError(404, 'Проект не найден');
+    const access = createAccountJobAccess(project, env);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json({
+      ok: true,
+      project: publicProject(project),
+      jobToken: access.token,
+      token: access.token,
+      jobTokenExpiresAt: access.expiresAt,
+    });
+  }));
+
   app.post('/api/jobs', asyncRoute(async (request, response) => {
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const input = request.body ?? {};
@@ -462,47 +872,85 @@ export function createApp(options = {}) {
     jobRequests.set(requester, recent);
 
     const processing = processingOptions(input.processing);
-    const access = createWebUploadAccess(env, Math.floor(now / 1000), processing);
-    const brief = {
-      version: 1,
-      jobId: access.job.jobId,
-      source: 'website',
-      customerName: customerName || null,
-      contact: contact || null,
+    const authenticated = accountService
+      ? await accountService.authenticate(accountCookieToken(request))
+      : null;
+    let accountProject = null;
+    let pendingAccountProject = null;
+    let access;
+    if (authenticated) {
+      assertAccountMutationOrigin(request);
+      await enforceProjectCreationLimit(authenticated.user.id);
+      const createdAt = new Date(now).toISOString();
+      pendingAccountProject = {
+        id: crypto.randomUUID(),
+        userId: authenticated.user.id,
+        jobId: `web-${crypto.randomUUID()}`,
+        title: projectTitle(input.title || input.projectTitle),
+        source: 'account',
+        processing,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      access = createAccountJobAccess(pendingAccountProject, env, Math.floor(now / 1000));
+    } else {
+      access = createWebUploadAccess(env, Math.floor(now / 1000), processing);
+    }
+    const brief = projectBrief(access, {
+      ...input,
+      customerName,
+      contact,
       projectType,
       comment,
       processing,
       quickStart,
+    }, {
+      source: pendingAccountProject ? 'account' : 'website',
+      accountUserId: pendingAccountProject?.userId ?? null,
+      defaultCustomerName: authenticated?.user.displayName,
+      processing,
       createdAt: new Date(now).toISOString(),
-      expiresAt: access.expiresAt,
-    };
-    await s3.send(new PutObjectCommand({
-      Bucket: bucket,
-      Key: `.briefs/${access.job.jobId}.json`,
-      Body: JSON.stringify(brief, null, 2),
-      ContentType: 'application/json; charset=utf-8',
-      Metadata: { jobid: access.job.jobId, source: 'website' },
-    }));
+    });
+    await putProjectBrief(s3, bucket, brief);
+    if (pendingAccountProject) {
+      try {
+        accountProject = await accountStore.createProject(
+          pendingAccountProject,
+          { quota: accountProjectQuota },
+        );
+      } catch (error) {
+        await removeProjectBrief(s3, bucket, pendingAccountProject.jobId);
+        throw error;
+      }
+    }
     response.status(201).json({
       ok: true,
       token: access.token,
       jobId: access.job.jobId,
       lifetimeHours: access.lifetimeHours,
       expiresAt: access.expiresAt,
+      ...(accountProject ? { project: publicProject(accountProject) } : {}),
     });
   }));
 
-  app.get('/api/health', (request, response) => {
-    response.json({
-      ok: true,
+  app.get('/api/health', asyncRoute(async (request, response) => {
+    const readiness = await accountReadiness();
+    const ready = !accountService || readiness.ready;
+    response.status(ready ? 200 : 503).json({
+      ok: ready,
       cloud: true,
       provider: 'timeweb-s3',
       protected: true,
+      accountsConfigured: Boolean(accountService),
+      accountsEnabled: Boolean(accountService) && readiness.ready,
+      accountsReady: readiness.ready,
+      accountBackend: readiness.backend,
+      accountSchemaVersion: readiness.schemaVersion,
       maxFileSize: integer(env.MAX_FILE_SIZE_BYTES, DEFAULT_MAX_FILE_SIZE),
       chunkSize: Math.max(integer(env.CHUNK_SIZE_BYTES, DEFAULT_CHUNK_SIZE), 5 * 1024 * 1024),
       retentionHours: integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS),
     });
-  });
+  }));
 
   app.get('/api/session', (request, response) => {
     const job = jobFromRequest(request);
@@ -624,6 +1072,15 @@ export function createApp(options = {}) {
       UploadId: session.multipartUploadId,
       MultipartUpload: { Parts: parts },
     }));
+    const stored = await s3.send(new HeadObjectCommand({
+      Bucket: bucket,
+      Key: session.key,
+    }));
+    const storedSize = Number(stored.ContentLength);
+    if (!Number.isSafeInteger(storedSize) || storedSize !== session.size) {
+      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: session.key }));
+      throw new HttpError(409, 'Размер загруженного файла не совпадает с ожидаемым');
+    }
 
     let pipelineTask = null;
     if (isProcessableVideoFile(session.name)) {
@@ -769,10 +1226,14 @@ export function createApp(options = {}) {
   app.get('/api/worker/tasks', asyncRoute(async (request, response) => {
     requireWorker(request, env);
     if (!bucket) throw new Error('S3_BUCKET is not configured');
+    const failedTaskId = request.query.failedTaskId
+      ? safeIdentifier(request.query.failedTaskId, 'taskId')
+      : null;
     const objects = await listPrefix(s3, bucket, '.queue/');
     const tasks = [];
     for (const object of objects) {
       const task = await objectJson(s3, bucket, object.Key);
+      if (failedTaskId && task.taskId !== failedTaskId) continue;
       let status = null;
       try {
         status = await objectJson(s3, bucket, statusKey(task.jobId, task.taskId));
@@ -782,7 +1243,11 @@ export function createApp(options = {}) {
       const updatedAt = Date.parse(String(status?.updatedAt ?? ''));
       const processingIsStale = status?.state === 'PROCESSING'
         && (!Number.isFinite(updatedAt) || Date.now() - updatedAt > 2 * 60 * 60 * 1000);
-      if (!status || status.state === 'QUEUED' || processingIsStale) tasks.push(task);
+      if (failedTaskId) {
+        if (status?.state === 'FAILED') tasks.push(task);
+      } else if (!status || status.state === 'QUEUED' || processingIsStale) {
+        tasks.push(task);
+      }
     }
     response.json({ ok: true, tasks: tasks.slice(0, 20) });
   }));
@@ -998,10 +1463,14 @@ export function createApp(options = {}) {
       next(error);
       return;
     }
-    if (!(error instanceof HttpError)) console.error(error);
-    const status = error instanceof HttpError ? error.status : 500;
+    if (!(error instanceof HttpError) && !(error instanceof AccountError)) console.error(error);
+    const status = error instanceof HttpError || error instanceof AccountError ? error.status : 500;
+    if (error instanceof AccountRateLimitError) {
+      response.setHeader('Retry-After', String(error.retryAfterSeconds));
+    }
     response.status(status).json({
       error: status === 500 ? 'Внутренняя ошибка сервера' : error.message,
+      ...(error instanceof AccountError ? { code: error.code } : {}),
     });
   });
 

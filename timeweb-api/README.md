@@ -32,7 +32,95 @@ TELEGRAM_BOT_TOKEN=<добавить после создания бота>
 TELEGRAM_WEBHOOK_SECRET=<добавить после создания бота>
 ADMIN_CHAT_ID=<Telegram ID владельца для уведомлений>
 WORKER_SECRET=<отдельная длинная случайная строка для Windows bridge>
+NODE_ENV=production
+DATABASE_URL=postgresql://<user>:<password>@<host>:<port>/<database>
+DATABASE_SSL=require
+DATABASE_SSL_REJECT_UNAUTHORIZED=true
+DATABASE_POOL_SIZE=10
+AUTH_PASSWORD_PEPPER=<отдельная длинная случайная строка>
+SESSION_AUDIT_SECRET=<отдельная длинная случайная строка>
+SESSION_LIFETIME_HOURS=720
+ACCOUNT_ALLOWED_ORIGIN=https://<единый-домен-сайта>
+TRUST_PROXY_HOPS=1
+AUTH_REGISTER_RATE_LIMIT=5
+AUTH_REGISTER_RATE_WINDOW_SECONDS=3600
+AUTH_LOGIN_RATE_LIMIT=10
+AUTH_LOGIN_IP_RATE_LIMIT=30
+AUTH_LOGIN_RATE_WINDOW_SECONDS=900
+ACCOUNT_PROJECT_RATE_LIMIT=20
+ACCOUNT_PROJECT_RATE_WINDOW_SECONDS=3600
+ACCOUNT_PROJECT_QUOTA=200
+RATE_LIMIT_RETENTION_HOURS=168
 ```
+
+`DATABASE_URL` необязателен для старого guest-flow. Если он не задан, загрузка по
+персональным ссылкам продолжает работать, а `/api/health` возвращает
+`accountsEnabled: false`. In-memory аккаунты разрешены только локально через
+`ACCOUNT_STORE=memory` и только при явном `NODE_ENV=development` или
+`NODE_ENV=test`. В production попытка включить memory-store останавливает запуск.
+
+При обычном `npm start` prestart автоматически запускает versioned migration
+runner (`npm run migrate`). Он применяет SQL-файлы из `migrations/` по порядку,
+записывает SHA-256 checksum в `account_schema_migrations` и останавливает запуск
+при ошибке или изменении уже применённой миграции. Не применяйте только
+`001_accounts.sql` вручную: актуальная схема включает все versioned migrations.
+
+Если `DATABASE_URL` задан, `NODE_ENV` должен быть явно равен `development`,
+`test` или `production`. В production значения `TOKEN_SECRET`,
+`AUTH_PASSWORD_PEPPER` и `SESSION_AUDIT_SECRET` должны содержать минимум 32
+символа и отличаться друг от друга; иначе приложение fail-closed и не стартует.
+
+Пароли хешируются через `scrypt`; сырые сессионные токены в БД не записываются.
+Браузер получает только cookie
+`__Host-montage_session` с атрибутами `HttpOnly`, `Secure`, `SameSite=Lax` и
+`Path=/`.
+
+`/api/health` является readiness-проверкой: при настроенной, но недоступной или
+непромигрированной PostgreSQL он возвращает HTTP 503 и
+`accountsEnabled: false`. Без `DATABASE_URL` guest-flow остаётся healthy, а
+аккаунты явно отключены.
+
+Лимиты регистрации, входа и создания проектов хранятся в PostgreSQL, поэтому не
+сбрасываются при рестарте и работают между экземплярами сервиса. Memory-store
+повторяет ту же семантику только для локальной разработки. Значения выше —
+production defaults: 5 регистраций/час на IP, 10 попыток входа за 15 минут на
+пару IP+email и 30 на IP, 20 новых проектов/час и не более 200 проектов на
+пользователя. `RATE_LIMIT_RETENTION_HOURS` управляет очисткой старых buckets.
+
+По умолчанию Express не доверяет `X-Forwarded-For`. Для Timeweb задайте
+`TRUST_PROXY_HOPS=1` только после подтверждения, что до приложения ровно один
+доверенный reverse proxy; иначе оставьте переменную пустой.
+
+Личный кабинет должен открываться с того же пользовательского домена, что и
+API. GitHub Pages можно оставить для старых временных ссылок, но Safari на
+iPhone не гарантирует работу account-cookie в схеме GitHub Pages → чужой домен
+API.
+
+Основные account endpoints:
+
+- `POST /api/auth/register` — регистрация по email и паролю;
+- `POST /api/auth/login` — вход и новая серверная сессия;
+- `GET /api/me` или `GET /api/auth/me` — текущий пользователь;
+- `POST /api/auth/logout` — отзыв текущей сессии;
+- `GET /api/projects` — проекты текущего пользователя;
+- `POST /api/projects` — новый проект и совместимый временный job-token;
+- `POST /api/projects/claim` — привязка существующего job-token к аккаунту;
+- `POST /api/projects/:projectId/access` — свежий job-token только для
+  собственного проекта; для совместимости принимается также его `jobId`.
+
+Старый `POST /api/jobs` сохранён. Если запрос пришёл с действующей account
+cookie, новый job автоматически записывается в список проектов вошедшего
+пользователя; без cookie маршрут продолжает создавать обычную временную заявку.
+
+Account responses не кешируются. Чужой `projectId` возвращает `404`, а не
+раскрывает существование проекта. `AUTH_PASSWORD_PEPPER`, `TOKEN_SECRET` и
+`SESSION_AUDIT_SECRET` должны быть разными секретами и храниться только в
+переменных Timeweb.
+
+`POST /api/projects` сохраняет нормализованный brief (`customerName`, `contact`,
+`projectType`, `comment`, `processing`) в том же S3-префиксе `.briefs/`, который
+использует совместимый `/api/jobs`, поэтому поля формы личного кабинета не
+теряются перед передачей локальному worker.
 
 Публичный сайт размещён на GitHub Pages; `public/config.js` указывает технический домен API. Express также может отдать страницу со своего домена для диагностики. В настройках CORS бакета разрешите origin `https://marakase12.github.io`, методы `GET`, `PUT`, `HEAD`, заголовки `*` и expose-заголовок `ETag`.
 

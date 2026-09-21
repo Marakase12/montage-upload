@@ -41,7 +41,7 @@ test('отклоняет изменённую и просроченную ссы
 
 test('отдаёт сайт и healthcheck из одного приложения', async (context) => {
   const app = createApp({
-    env: { TOKEN_SECRET: secret, RETENTION_HOURS: '12' },
+    env: { TOKEN_SECRET: secret, RETENTION_HOURS: '12', NODE_ENV: 'production' },
     s3: { send: async () => ({}) },
   });
   const server = app.listen(0, '127.0.0.1');
@@ -51,7 +51,8 @@ test('отдаёт сайт и healthcheck из одного приложени�
 
   const home = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(home.status, 200);
-  assert.match(await home.text(), /MontageAI Studio/);
+  assert.equal(home.headers.get('strict-transport-security'), 'max-age=31536000');
+  assert.match(await home.text(), /MontageAI/);
 
   const health = await fetch(`http://127.0.0.1:${port}/api/health`, {
     headers: { Origin: `http://127.0.0.1:${port}` },
@@ -60,6 +61,86 @@ test('отдаёт сайт и healthcheck из одного приложени�
   const payload = await health.json();
   assert.equal(payload.retentionHours, 12);
   assert.equal(payload.maxFileSize, 1024 * 1024 * 1024);
+});
+
+async function completeMultipartUpload(context, storedSize) {
+  const commands = [];
+  const jobId = 'web-sizecheck01';
+  const uploadId = 'upload-sizecheck01';
+  const declaredSize = 10 * 1024 * 1024 + 17;
+  const expires = Math.floor(Date.now() / 1000) + 60;
+  const app = createApp({
+    env: { TOKEN_SECRET: secret, S3_BUCKET: 'test-bucket' },
+    s3: {
+      send: async (command) => {
+        commands.push(command);
+        if (command.constructor.name === 'ListPartsCommand') {
+          return {
+            Parts: [
+              { ETag: '"part-1"', PartNumber: 1 },
+              { ETag: '"part-2"', PartNumber: 2 },
+            ],
+          };
+        }
+        if (command.constructor.name === 'CompleteMultipartUploadCommand') {
+          return { ETag: '"completed"' };
+        }
+        if (command.constructor.name === 'HeadObjectCommand') {
+          return { ContentLength: storedSize };
+        }
+        return {};
+      },
+    },
+  });
+  const server = app.listen(0, '127.0.0.1');
+  context.after(() => new Promise((resolve) => server.close(resolve)));
+  await new Promise((resolve) => server.once('listening', resolve));
+  const jobToken = signToken({ kind: 'job', jobId, source: 'web', exp: expires }, secret);
+  const sessionToken = signToken({
+    kind: 'session',
+    sessionId: uploadId,
+    multipartUploadId: 'multipart-sizecheck01',
+    jobId,
+    key: `${jobId}/clip.mp4`,
+    name: 'clip.mp4',
+    size: declaredSize,
+    type: 'video/mp4',
+    chunkSize: 10 * 1024 * 1024,
+    exp: expires,
+  }, secret);
+  const response = await fetch(
+    `http://127.0.0.1:${server.address().port}/api/uploads/${uploadId}/complete`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${jobToken}`,
+        'X-Upload-Session': sessionToken,
+      },
+    },
+  );
+  return { commands, declaredSize, response };
+}
+
+test('проверяет фактический размер S3 перед постановкой видео в очередь', async (context) => {
+  const declaredSize = 10 * 1024 * 1024 + 17;
+  const { commands, response } = await completeMultipartUpload(context, declaredSize);
+  assert.equal(response.status, 200);
+  const names = commands.map((command) => command.constructor.name);
+  assert.ok(names.indexOf('HeadObjectCommand') > names.indexOf('CompleteMultipartUploadCommand'));
+  assert.ok(names.indexOf('PutObjectCommand') > names.indexOf('HeadObjectCommand'));
+  assert.equal(names.includes('DeleteObjectCommand'), false);
+});
+
+test('удаляет multipart-объект неверного размера и не создаёт pipeline-задачу', async (context) => {
+  const { commands, declaredSize, response } = await completeMultipartUpload(context, 1);
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /Размер загруженного файла/);
+  const names = commands.map((command) => command.constructor.name);
+  assert.equal(names.includes('DeleteObjectCommand'), true);
+  assert.equal(names.includes('PutObjectCommand'), false);
+  const deletion = commands.find((command) => command.constructor.name === 'DeleteObjectCommand');
+  assert.equal(deletion.input.Key, 'web-sizecheck01/clip.mp4');
+  assert.ok(declaredSize > 1);
 });
 
 test('создаёт изолированную веб-заявку без Telegram', async (context) => {
@@ -198,6 +279,40 @@ test('защищает API локальной машины отдельным с
   assert.equal(payload.status.stage, 'analysis');
   assert.equal(commands.at(-1).constructor.name, 'PutObjectCommand');
   assert.equal(commands.at(-1).input.Key, '.status/web-12345678/task-12345.json');
+});
+
+test('показывает только запрошенную неудавшуюся задачу для безопасного повтора', async (context) => {
+  const jobId = 'web-12345678';
+  const taskId = 'task-failed01';
+  const task = { jobId, taskId, fileName: 'rotated.mp4', size: 100 };
+  const status = { jobId, taskId, state: 'FAILED', updatedAt: new Date().toISOString() };
+  const app = createApp({
+    env: { TOKEN_SECRET: secret, WORKER_SECRET: 'worker-secret', S3_BUCKET: 'test-bucket' },
+    s3: {
+      send: async (command) => {
+        if (command.constructor.name === 'ListObjectsV2Command') {
+          return { Contents: [{ Key: `.queue/${jobId}/${taskId}.json` }] };
+        }
+        if (command.constructor.name === 'GetObjectCommand') {
+          const body = command.input.Key.startsWith('.queue/') ? task : status;
+          return { Body: { transformToString: async () => JSON.stringify(body) } };
+        }
+        return {};
+      },
+    },
+  });
+  const server = app.listen(0, '127.0.0.1');
+  context.after(() => new Promise((resolve) => server.close(resolve)));
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/api/worker/tasks`;
+  const headers = { 'X-Worker-Secret': 'worker-secret' };
+
+  assert.equal((await fetch(base)).status, 401);
+  assert.equal((await (await fetch(base, { headers })).json()).tasks.length, 0);
+  const found = await (await fetch(`${base}?failedTaskId=${taskId}`, { headers })).json();
+  assert.deepEqual(found.tasks, [task]);
+  const unrelated = await (await fetch(`${base}?failedTaskId=task-other01`, { headers })).json();
+  assert.equal(unrelated.tasks.length, 0);
 });
 
 test('создаёт правку и требует отдельное явное подтверждение preview', async (context) => {

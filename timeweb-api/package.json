@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "migrate": "node migrations.js",
+    "prestart": "npm run migrate",
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test"
@@ -14,6 +16,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1135.0",
     "@aws-sdk/s3-request-presigner": "^3.1135.0",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "pg": "^8.23.0"
   }
 }
