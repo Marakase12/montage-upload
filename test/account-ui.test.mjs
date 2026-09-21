@@ -65,15 +65,16 @@ test('pending claim сохраняется до подтверждённого �
   );
 });
 
-test('авторизованная загрузка сохраняет brief через старый jobs endpoint', () => {
+test('авторизованная загрузка требует account endpoint и не понижается до гостевой', () => {
   const createStart = app.indexOf('async function createProject()');
   const createEnd = app.indexOf('orderForm.addEventListener', createStart);
   const create = app.slice(createStart, createEnd);
   assert.match(create, /const accountProject = Boolean\(currentUser/);
-  assert.match(create, /api\('\/api\/jobs'/);
+  assert.match(create, /api\(accountProject \? '\/api\/projects' : '\/api\/jobs'/);
   assert.match(create, /projectAuth: !accountProject/);
   assert.match(create, /requestText: processingRequest\.value/);
-  assert.doesNotMatch(create, /accountProject \? '\/api\/projects'/);
+  assert.match(create, /accountProject && !result\.project/);
+  assert.doesNotMatch(create, /currentProject = result\.project \|\|/);
 });
 
 test('сетевой сбой logout не очищает локальную сессию', () => {

@@ -1,3 +1,5 @@
+import { freshProcessingOptions, sourceProblem, canStartCreation, projectMatches, previewIdentity } from './studio-state.js';
+
 const dropzone = document.querySelector('#dropzone');
 const fileInput = document.querySelector('#fileInput');
 const extraFileInput = document.querySelector('#extraFileInput');
@@ -31,10 +33,29 @@ const customerContact = document.querySelector('#customerContact');
 const projectType = document.querySelector('#projectType');
 const projectComment = document.querySelector('#projectComment');
 const processingMode = document.querySelector('#processingMode');
+const aspectInputs = ['#aspect916', '#aspect11', '#aspect169'].map((id) => document.querySelector(id));
 const processingRequest = document.querySelector('#processingRequest');
 const faceTrackingEnabled = document.querySelector('#faceTrackingEnabled');
 const subtitlesEnabled = document.querySelector('#subtitlesEnabled');
 const hookEnabled = document.querySelector('#hookEnabled');
+const selectedSource = document.querySelector('#selectedSource');
+const selectedSourceVideo = document.querySelector('#selectedSourceVideo');
+const selectedSourceName = document.querySelector('#selectedSourceName');
+const selectedSourceMeta = document.querySelector('#selectedSourceMeta');
+const sourceEmpty = document.querySelector('#sourceEmpty');
+const modeHint = document.querySelector('#modeHint');
+const pipelineNotice = document.querySelector('#pipelineNotice');
+const workerNotice = document.querySelector('#workerNotice');
+const retryStates = new Map();
+let workerStatus = null;
+let healthRefreshPending = false;
+const previewDownload = document.querySelector('#previewDownload');
+const previewApprove = document.querySelector('#previewApprove');
+const previewState = document.querySelector('#previewState');
+const previewTaskTitle = document.querySelector('#previewTaskTitle');
+const previewRefresh = document.querySelector('#previewRefresh');
+const projectSearch = document.querySelector('#projectSearch');
+const projectCount = document.querySelector('#projectCount');
 const pipelineSection = document.querySelector('#pipelineSection');
 const pipelineList = document.querySelector('#pipelineList');
 const refreshPipeline = document.querySelector('#refreshPipeline');
@@ -93,6 +114,17 @@ const authStatus = document.querySelector('#authStatus');
 const authSubmit = document.querySelector('#authSubmit');
 let revisionTask = null;
 let approvalTask = null;
+let selectedFile = null;
+let sourceObjectUrl = '';
+let projectCache = [];
+let projectsLoading = false;
+let projectFilter = 'all';
+let pipelineLoading = false;
+let lastPipelineTasks = [];
+let activePreviewTask = null;
+let activePreviewIdentity = '';
+let previewRevisionPending = false;
+const revisionDrafts = new Map();
 
 const tasks = new Set();
 const config = window.MONTAGE_UPLOAD_CONFIG ?? {};
@@ -101,7 +133,7 @@ const apiOrigin = new URL(apiBase || window.location.origin, window.location.hre
 const accountIsSameOrigin = apiOrigin === window.location.origin;
 const pendingClaimStorageKey = 'montage-pending-claim-token';
 const manualTokenEnabled = config.allowManualToken === true
-  || ['localhost', '127.0.0.1'].includes(window.location.hostname);
+  || (config.allowManualToken !== false && ['localhost', '127.0.0.1'].includes(window.location.hostname));
 const url = new URL(window.location.href);
 const linkToken = url.searchParams.get('token') ?? '';
 const fragmentParameters = new URLSearchParams(url.hash.replace(/^#/, ''));
@@ -141,7 +173,7 @@ function setAccessState(state) {
     accessText.textContent = 'Можно загружать файлы. Другие пользователи их не увидят.';
   } else if (state === 'locked') {
     accessTitle.textContent = 'Начните новый проект';
-    accessText.textContent = 'Выберите файл — защищённый проект создастся автоматически.';
+    accessText.textContent = 'Выберите видео, проверьте настройки и нажмите «Начать монтаж».';
   }
 }
 
@@ -218,6 +250,7 @@ function accountErrorMessage(error, fallback = 'Не удалось выполн
 }
 
 function setAccountMessage(message, kind = 'error') {
+  delete accountMessage.dataset.refreshError;
   accountMessage.className = `account-message ${kind}`;
   accountMessage.textContent = message;
   accountMessage.hidden = !message;
@@ -314,8 +347,17 @@ function renderAuthState() {
 function showGuestStudio() {
   accountDashboard.hidden = true;
   projectShell.hidden = false;
-  projectContext.hidden = true;
-  workspace.hidden = false;
+  const existingProject = Boolean(uploadToken);
+  projectContext.hidden = !existingProject;
+  workspace.hidden = existingProject;
+  backToProjects.hidden = true;
+  addFilesButton.hidden = !existingProject;
+  const anotherProjectButton = document.querySelector('#anotherProjectButton');
+  if (anotherProjectButton) anotherProjectButton.hidden = !existingProject;
+  if (existingProject && !currentProject) {
+    projectContextTitle.textContent = 'Ваш проект';
+    projectContextMeta.textContent = 'Последний открытый ролик';
+  }
 }
 
 function showAccountDashboard() {
@@ -330,6 +372,10 @@ function showAccountDashboard() {
 }
 
 function resetProjectSurface() {
+  retryStates.clear();
+  clearSelectedSource();
+  if (previewDialog.open) previewDialog.close();
+  lastPipelineTasks = [];
   tasks.clear();
   pendingTasks = [];
   uploadList.replaceChildren();
@@ -339,12 +385,91 @@ function resetProjectSurface() {
   filesSection.hidden = true;
   updateEmptyState();
   orderStatus.textContent = '';
-  orderSubmit.hidden = true;
+  if (pipelineNotice) pipelineNotice.hidden = true;
+  orderSubmit.hidden = false;
+  syncCreationState();
+}
+
+function updateModeHint() {
+  if (modeHint) modeHint.textContent = processingMode.value === 'long'
+    ? 'Найдём сильные моменты и объясним выбор. На этом этапе короткие ролики автоматически не создаются.'
+    : 'Оформим видео целиком. Начало и конец сохранятся, если вы не попросите иначе.';
+}
+
+function resetProcessingOptions() {
+  const defaults = freshProcessingOptions();
+  processingMode.value = defaults.mode;
+  aspectInputs.forEach((input) => { input.checked = input.value === defaults.aspectRatio; });
+  processingRequest.value = defaults.requestText;
+  faceTrackingEnabled.checked = defaults.faceTrackingEnabled;
+  subtitlesEnabled.checked = defaults.subtitlesEnabled;
+  hookEnabled.checked = defaults.hookEnabled;
+  projectComment.value = '';
+  projectConsent.checked = false;
+  document.querySelectorAll('.mode-option').forEach((option) => {
+    const selected = option.dataset.mode === defaults.mode;
+    option.classList.toggle('selected', selected);
+    option.setAttribute('aria-pressed', String(selected));
+  });
+  updateModeHint();
+  updateProcessingSummary();
+  syncCreationState();
+}
+
+function selectedAspectRatio() {
+  return aspectInputs.find((input) => input.checked)?.value || '9:16';
+}
+
+function updateProcessingSummary() {
+  const summary = document.querySelector('#processingSummary');
+  if (!summary) return;
+  const enabled = [
+    subtitlesEnabled.checked && 'субтитры с подсветкой',
+    hookEnabled.checked && 'верхний заголовок',
+    faceTrackingEnabled.checked && 'слежение за лицом',
+  ].filter(Boolean);
+  const ratio = selectedAspectRatio();
+  const dimensions = { '9:16': '1080 × 1920', '1:1': '1080 × 1080', '16:9': '1920 × 1080' };
+  const hint = document.querySelector('#formatHint');
+  if (hint) hint.textContent = `${dimensions[ratio]} · видео без растягивания`;
+  summary.textContent = `Формат ${ratio}. ` + (enabled.length
+    ? `Включено: ${enabled.join(', ')}.`
+    : 'Без субтитров, верхнего заголовка и слежения за лицом.');
+}
+
+function syncCreationState() {
+  orderSubmit.disabled = !canStartCreation({ file: selectedFile, consent: projectConsent.checked, busy: creatingProject, maxFileSize });
+  orderSubmit.textContent = creatingProject ? 'Создаём проект…' : 'Начать монтаж';
+  fileInput.disabled = creatingProject;
+  aspectInputs.forEach((input) => { input.disabled = creatingProject; });
+  const remove = document.querySelector('#removeSourceButton');
+  if (remove) remove.disabled = creatingProject;
+  const note = document.querySelector('.action-note');
+  if (note) {
+    note.hidden = Boolean(selectedFile && projectConsent.checked);
+    note.textContent = selectedFile ? 'Подтвердите временное хранение, чтобы начать.' : 'Сначала выберите исходное видео.';
+  }
+}
+
+function clearSelectedSource() {
+  selectedFile = null;
+  if (selectedSourceVideo) {
+    selectedSourceVideo.pause();
+    selectedSourceVideo.removeAttribute('src');
+    selectedSourceVideo.load();
+    selectedSourceVideo.hidden = true;
+  }
+  if (sourceObjectUrl) URL.revokeObjectURL(sourceObjectUrl);
+  sourceObjectUrl = '';
+  if (selectedSource) selectedSource.hidden = true;
+  if (sourceEmpty) sourceEmpty.hidden = false;
+  fileInput.value = '';
+  syncCreationState();
 }
 
 async function startNewAccountProject() {
-  const uploadInProgress = [...tasks].some((task) => !['complete', 'cancelled', 'error'].includes(task.state));
-  if (uploadInProgress) {
+  const uploadInProgress = [...tasks].some((task) => ['connecting', 'uploading', 'finalizing'].includes(task.state));
+  if (uploadInProgress || creatingProject) {
     showAccountDashboard();
     setAccountMessage('Текущий файл ещё загружается. Дождитесь окончания передачи, прежде чем создавать новый проект.', 'info');
     return;
@@ -355,15 +480,18 @@ async function startNewAccountProject() {
   tokenInput.value = '';
   sessionStorage.removeItem('montage-upload-link-token');
   resetProjectSurface();
+  resetProcessingOptions();
   accountDashboard.hidden = true;
   projectShell.hidden = false;
   projectContext.hidden = false;
   workspace.hidden = false;
   orderSection.hidden = false;
   addFilesButton.hidden = true;
+  const anotherProjectButton = document.querySelector('#anotherProjectButton');
+  if (anotherProjectButton) anotherProjectButton.hidden = true;
   projectContextTitle.textContent = 'Новый ролик';
   projectContextMeta.textContent = 'Новый проект';
-  projectConsent.checked = false;
+  backToProjects.hidden = !currentUser;
   await checkHealth();
   workspace.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -380,12 +508,17 @@ function projectName(project) {
 }
 
 function projectState(project) {
-  return String(project?.state || project?.status?.state || project?.pipelineState || 'PROJECT').toUpperCase();
+  return String(project?.state || project?.status?.state || project?.pipelineState || 'UNKNOWN').toUpperCase();
 }
 
 function projectStateLabel(state) {
   return {
     PROJECT: 'Проект создан',
+    CREATED: 'Видео ещё не добавлено',
+    UPLOADED: 'Видео загружено',
+    EXPIRED: 'Срок хранения истёк',
+    UNAVAILABLE: 'Файл недоступен',
+    UNKNOWN: 'Статус уточняется',
     NEW: 'Проект создан',
     UPLOADING: 'Загружается',
     QUEUED: 'В очереди',
@@ -413,7 +546,15 @@ function formatProjectDate(value) {
 function renderProjects(projects) {
   projectsList.replaceChildren();
   projectsEmpty.hidden = projects.length > 0;
-  projects.forEach((project) => {
+  const visible = projects.filter((project) => projectMatches(project, projectSearch?.value, projectFilter));
+  if (projectCount) projectCount.textContent = projects.length ? String(projects.length) : '';
+  if (projects.length && !visible.length) {
+    const empty = document.createElement('p');
+    empty.className = 'project-empty-search';
+    empty.textContent = 'Здесь пока нет роликов. Попробуйте другой фильтр или название.';
+    projectsList.append(empty);
+  }
+  visible.forEach((project) => {
     const state = projectState(project);
     const percent = Math.max(0, Math.min(100, Number(project.percent ?? project.status?.percent ?? (state === 'APPROVED' ? 100 : 0)) || 0));
     const card = document.createElement('article');
@@ -425,7 +566,7 @@ function renderProjects(projects) {
     coverIcon.textContent = state === 'LONG_CANDIDATES_READY' ? '▦' : '▶';
     const modeBadge = document.createElement('span');
     modeBadge.className = 'project-badge';
-    modeBadge.textContent = String(project.processing?.mode || project.mode || 'short').toUpperCase();
+    modeBadge.textContent = (project.processing?.mode || project.mode) === 'long' ? 'Нарезка' : 'Целиком';
     cover.append(coverIcon, modeBadge);
 
     const body = document.createElement('div');
@@ -439,9 +580,15 @@ function renderProjects(projects) {
     status.className = `status-chip ${projectChipClass(state)}`.trim();
     status.textContent = projectStateLabel(state);
     const date = document.createElement('span');
-    date.textContent = formatProjectDate(project.updatedAt || project.createdAt);
+    date.textContent = formatProjectDate(project.summary?.updatedAt || project.updatedAt || project.createdAt);
     meta.append(status, date);
     body.append(title, meta);
+    if (project.detail) {
+      const detail = document.createElement('p');
+      detail.className = 'project-card-detail';
+      detail.textContent = project.detail;
+      body.append(detail);
+    }
     if (percent > 0 && percent < 100) {
       const progress = document.createElement('div');
       progress.className = 'project-card-progress';
@@ -461,19 +608,31 @@ function renderProjects(projects) {
   });
 }
 
-async function loadAccountProjects({ preserveMessage = false } = {}) {
-  if (!currentUser || !authEnabled) return;
-  projectSkeletons.hidden = false;
-  projectsList.hidden = true;
-  projectsEmpty.hidden = true;
+async function loadAccountProjects({ preserveMessage = false, background = false } = {}) {
+  if (!currentUser || !authEnabled || projectsLoading) return;
+  projectsLoading = true;
+  const requestedUser = currentUser;
+  if (!background) {
+    projectSkeletons.hidden = false;
+    projectsList.hidden = true;
+    projectsEmpty.hidden = true;
+  }
   if (!preserveMessage) accountMessage.hidden = true;
   try {
     const result = await api('/api/projects', { projectAuth: false, timeoutMs: 15000 });
+    if (requestedUser !== currentUser) return;
+    if (accountMessage.dataset.refreshError) setAccountMessage('');
     const projects = Array.isArray(result) ? result : (result.projects || result.items || []);
-    renderProjects(projects);
+    const changed = JSON.stringify(projects) !== JSON.stringify(projectCache);
+    projectCache = projects;
+    if (!background || changed) renderProjects(projectCache);
   } catch (error) {
-    setAccountMessage(accountErrorMessage(error, 'Не удалось загрузить список роликов.'), 'error');
+    if (requestedUser === currentUser) {
+      setAccountMessage(accountErrorMessage(error, 'Не удалось обновить список роликов. Последний статус сохранён.'), 'error');
+      accountMessage.dataset.refreshError = 'true';
+    }
   } finally {
+    projectsLoading = false;
     projectSkeletons.hidden = true;
     projectsList.hidden = false;
   }
@@ -482,6 +641,10 @@ async function loadAccountProjects({ preserveMessage = false } = {}) {
 async function openAccountProject(project, control) {
   const jobId = projectIdentifier(project);
   if (!jobId) return;
+  if (creatingProject || [...tasks].some((task) => ['connecting', 'uploading', 'finalizing'].includes(task.state))) {
+    setAccountMessage('Видео ещё передаётся. Дождитесь завершения загрузки, прежде чем открывать другой проект.', 'info');
+    return;
+  }
   control.disabled = true;
   const originalText = control.textContent;
   control.textContent = 'Открываем…';
@@ -496,15 +659,17 @@ async function openAccountProject(project, control) {
     uploadToken = token;
     tokenInput.value = token;
     sessionStorage.setItem('montage-upload-link-token', token);
-    currentProject = project;
+    currentProject = access.project || project;
     resetProjectSurface();
     accountDashboard.hidden = true;
     projectShell.hidden = false;
     projectContext.hidden = false;
     workspace.hidden = true;
     addFilesButton.hidden = false;
+    const anotherProjectButton = document.querySelector('#anotherProjectButton');
+    if (anotherProjectButton) anotherProjectButton.hidden = false;
     projectContextTitle.textContent = projectName(project);
-    projectContextMeta.textContent = `${String(project.processing?.mode || project.mode || 'short').toUpperCase()} · ${formatProjectDate(project.createdAt)}`;
+    projectContextMeta.textContent = `${String(project.processing?.mode || project.mode || 'short').toUpperCase()} · ${project.processing?.aspectRatio || '9:16'} · ${formatProjectDate(project.createdAt)}`;
     await checkHealth();
     await Promise.allSettled([loadFiles(), loadPipeline()]);
     projectContext.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -844,8 +1009,7 @@ async function checkHealth() {
     const health = await api('/api/health', { timeoutMs: 8000 });
     apiAvailable = true;
     serverProtected = health.protected;
-    serverState.className = 'server-state online';
-    serverState.querySelector('span:last-child').textContent = 'Сервер готов';
+    updateWorkerState(health.worker);
     limitValue.textContent = formatBytes(health.maxFileSize);
     maxFileSize = health.maxFileSize;
     chunkValue.textContent = formatBytes(health.chunkSize);
@@ -881,7 +1045,7 @@ async function checkHealth() {
       dropzone.classList.remove('locked');
       dropzone.removeAttribute('aria-disabled');
       filesSection.hidden = false;
-      orderSection.hidden = true;
+      orderSection.hidden = Boolean(uploadToken);
       // The processing panel appears only after a real pipeline task exists.
     }
   } catch (error) {
@@ -909,19 +1073,23 @@ async function checkHealth() {
     accessBanner.dataset.state = 'error';
     serverState.querySelector('span:last-child').textContent = 'Нет связи с сервером';
     accessTitle.textContent = 'Облако временно недоступно';
-    accessText.textContent = 'Файл можно выбрать сейчас. Когда связь восстановится, нажмите «Продолжить загрузку».';
+    accessText.textContent = 'Видео останется выбранным. Проверьте связь и снова нажмите «Начать монтаж».';
     orderStatus.className = 'form-status error';
     orderStatus.textContent = error.message;
     fileInput.disabled = false;
     extraFileInput.disabled = false;
     dropzone.classList.remove('locked');
     dropzone.removeAttribute('aria-disabled');
+  } finally {
+    syncCreationState();
   }
 }
 
 async function loadFiles() {
+  const requestedToken = uploadToken;
   try {
     const result = await api('/api/files');
+    if (requestedToken !== uploadToken) return;
     destinationPath.textContent = 'Защищённое хранилище';
     filesList.replaceChildren();
     if (!result.files.length) {
@@ -942,6 +1110,7 @@ async function loadFiles() {
       filesList.append(item);
     });
   } catch (error) {
+    if (requestedToken !== uploadToken) return;
     filesList.textContent = error.message;
   }
 }
@@ -957,16 +1126,79 @@ function pipelineStateLabel(state) {
   }[state] ?? state;
 }
 
+function updateWorkerState(worker) {
+  workerStatus = worker || { state: 'UNKNOWN', phase: null };
+  const online = workerStatus.state === 'ONLINE';
+  serverState.className = `server-state ${online ? 'online' : 'waiting'}`;
+  serverState.querySelector('span:last-child').textContent = online
+    ? (workerStatus.phase === 'busy' ? 'Обработчик занят' : 'Готов к монтажу')
+    : 'Загрузка доступна';
+  serverState.setAttribute('aria-label', online ? 'Сервер и обработчик на связи' : 'Сервер на связи, обработчик пока не подтвердил доступность');
+  if (workerNotice) {
+    workerNotice.hidden = online;
+    workerNotice.textContent = workerStatus.state === 'OFFLINE'
+      ? 'Обработчик сейчас не в сети. Видео можно загрузить: оно будет ждать в очереди до подключения, в пределах срока хранения файлов.'
+      : 'Сервер доступен. Связь с обработчиком пока не подтверждена — загруженное видео будет ждать в очереди.';
+  }
+}
+
+async function refreshWorkerHealth() {
+  if (healthRefreshPending) return;
+  healthRefreshPending = true;
+  try {
+    const health = await api('/api/health', { timeoutMs: 8000 });
+    updateWorkerState(health.worker);
+  } catch {
+    updateWorkerState({ state: 'UNKNOWN' });
+    serverState.className = 'server-state offline';
+    serverState.querySelector('span:last-child').textContent = 'Проверяем связь';
+    if (workerNotice) workerNotice.textContent = 'Не удаётся обновить связь с сервисом. Это не подтверждает ошибку обработки; проверим ещё раз автоматически.';
+  } finally { healthRefreshPending = false; }
+}
+
+async function retryPipelineTask(task) {
+  const requestedToken = uploadToken;
+  if (!requestedToken || task.state !== 'FAILED' || task.retryable !== true || retryStates.get(task.taskId)?.pending) return false;
+  const state = { pending: true, message: 'Передаём запрос на повтор…', error: false };
+  retryStates.set(task.taskId, state);
+  try {
+    const result = await api(`/api/pipeline/${encodeURIComponent(task.taskId)}/retry`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    if (!result.ok || !['QUEUED', 'PROCESSING'].includes(result.status?.state)) throw new Error('Сервис не подтвердил повтор. Обновите статус перед следующей попыткой.');
+    if (requestedToken !== uploadToken) return false;
+    state.message = 'Повтор принят. Загрузка исходника заново не нужна.';
+    await loadPipeline();
+    return true;
+  } catch (error) {
+    if (requestedToken !== uploadToken) return false;
+    state.message = error.message;
+    state.error = true;
+    return false;
+  } finally {
+    state.pending = false;
+    if (state.button) state.button.disabled = false;
+    if (state.node) {
+      state.node.textContent = state.message;
+      state.node.className = `review-status${state.error ? ' error' : ''}`;
+    }
+  }
+}
+
 async function sendPipelineAction(task, payload, statusNode, controls) {
   controls.forEach((control) => { control.disabled = true; });
   statusNode.className = 'review-status';
   statusNode.textContent = 'Передаём действие в обработку…';
   try {
-    await api(`/api/pipeline/${encodeURIComponent(task.taskId)}/actions`, {
+    const result = await api(`/api/pipeline/${encodeURIComponent(task.taskId)}/actions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    if (result.action) {
+      task.action = result.action;
+      if (activePreviewTask?.taskId === task.taskId) syncReview({ ...activePreviewTask, action: result.action });
+    }
     statusNode.className = 'review-status success';
     statusNode.textContent = payload.kind === 'APPROVE'
       ? 'Подтверждение принято. Проверяю и фиксирую final.mp4…'
@@ -983,6 +1215,7 @@ async function sendPipelineAction(task, payload, statusNode, controls) {
 
 function appendReviewControls(card, task) {
   if (!['READY_FOR_REVIEW', 'APPROVED'].includes(task.state)) return;
+  if (task.resultAvailability && task.resultAvailability !== 'AVAILABLE') return;
   const actionBusy = ['PENDING', 'PROCESSING'].includes(task.action?.state);
   const panel = document.createElement('div');
   panel.className = 'review-actions';
@@ -1012,31 +1245,95 @@ function appendReviewControls(card, task) {
     status.textContent = '✅ Final зафиксирован. Публикация не запускалась.';
   }
   revise.addEventListener('click', () => {
-    revisionTask = task;
-    revisionContext.textContent = task.fileName || task.title || 'Текущая версия ролика';
-    revisionText.value = '';
-    revisionStatus.textContent = '';
-    revisionDialog.showModal();
-    revisionText.focus();
+    openReview(task, true);
   });
   approve.addEventListener('click', () => {
-    approvalTask = { task, status, controls: [revise, approve] };
-    approvalCopy.textContent = task.fileName
-      ? `Мы зафиксируем preview «${task.fileName}» и создадим финальный MP4.`
-      : 'Мы зафиксируем выбранный preview и создадим финальный MP4.';
-    approvalStatus.textContent = '';
-    approvalStatus.className = 'review-status';
-    approvalDialog.showModal();
+    openApproval(task, status, [revise, approve]);
   });
   buttons.append(revise, approve);
   panel.append(buttons, status);
   card.append(panel);
 }
 
+function openApproval(task, status, controls = []) {
+  approvalTask = { task, status, controls };
+  approvalCopy.textContent = task.fileName
+    ? `Зафиксируем текущую версию «${task.fileName}» и создадим финальный MP4.`
+    : 'Зафиксируем текущую версию и создадим финальный MP4.';
+  approvalStatus.textContent = '';
+  approvalStatus.className = 'review-status';
+  approvalConfirm.disabled = false;
+  approvalCancel.disabled = false;
+  if (!approvalDialog.open) approvalDialog.showModal();
+}
+
+function syncReview(task) {
+  activePreviewTask = task;
+  revisionTask = task;
+  const resultUnavailable = task.resultAvailability && task.resultAvailability !== 'AVAILABLE';
+  const ready = !resultUnavailable && ['READY_FOR_REVIEW', 'APPROVED'].includes(task.state);
+  const busy = ['PENDING', 'PROCESSING'].includes(task.action?.state);
+  revisionDialog.hidden = !ready && !busy;
+  revisionSubmit.disabled = !ready || busy || previewRevisionPending;
+  revisionText.disabled = previewRevisionPending;
+  if (previewTaskTitle) previewTaskTitle.textContent = task.fileName || task.title || 'Ваш ролик';
+  revisionContext.textContent = busy ? 'Применяем изменения. Можно подготовить следующую правку.' : 'Опишите изменения своими словами.';
+  if (previewState) previewState.textContent = resultUnavailable
+    ? (task.resultUnavailableReason || 'Результат сейчас недоступен')
+    : busy ? 'Применяем изменения…' : pipelineStateLabel(task.state);
+  if (previewApprove) {
+    previewApprove.hidden = !ready;
+    previewApprove.disabled = busy || task.state === 'APPROVED' || previewIdentity(task) !== activePreviewIdentity;
+    previewApprove.textContent = task.state === 'APPROVED' ? 'Финальная версия подтверждена' : 'Подтвердить ролик';
+  }
+  if (previewDownload) {
+    previewDownload.hidden = !task.downloadUrl;
+    if (task.downloadUrl) {
+      previewDownload.href = task.downloadUrl;
+      previewDownload.download = `MontageAI_${task.taskId}.mp4`;
+    } else previewDownload.removeAttribute('href');
+  }
+  if (previewRefresh) previewRefresh.hidden = !task.previewUrl || previewIdentity(task) === activePreviewIdentity;
+  if (task.action?.state === 'FAILED') {
+    revisionStatus.className = 'review-status error';
+    revisionStatus.textContent = task.action.detail || 'Не удалось применить изменение. Текущая версия сохранена.';
+  } else if (busy) {
+    revisionStatus.className = 'review-status';
+    revisionStatus.textContent = task.action.kind === 'APPROVE' ? 'Проверяем и сохраняем финальную версию…' : 'Правка в работе. Новую версию можно будет открыть здесь.';
+  } else if (previewRefresh && !previewRefresh.hidden) {
+    revisionStatus.className = 'review-status success';
+    revisionStatus.textContent = 'Новая версия готова. Нажмите «Обновить видео», когда закончите просмотр.';
+  }
+}
+
+function openReview(task, focusRevision = false) {
+  if (revisionTask) revisionDrafts.set(revisionTask.taskId, revisionText.value);
+  const changed = activePreviewTask?.taskId !== task.taskId || !previewVideo.getAttribute('src');
+  if (changed) {
+    revisionText.value = revisionDrafts.get(task.taskId) || '';
+    revisionStatus.textContent = '';
+    if (task.previewUrl) previewVideo.src = task.previewUrl;
+    activePreviewIdentity = previewIdentity(task);
+  }
+  syncReview(task);
+  if (!previewDialog.open) previewDialog.showModal();
+  if (focusRevision) revisionText.focus();
+}
+
 async function loadPipeline() {
-  if (!uploadToken) return;
+  if (!uploadToken || pipelineLoading === uploadToken) return;
+  const requestedToken = uploadToken;
+  pipelineLoading = requestedToken;
   try {
     const result = await api('/api/pipeline');
+    if (requestedToken !== uploadToken) return;
+    if (result.worker) updateWorkerState(result.worker);
+    lastPipelineTasks = result.tasks;
+    if (pipelineNotice) pipelineNotice.hidden = true;
+    if (activePreviewTask && previewDialog.open) {
+      const latest = result.tasks.find((task) => task.taskId === activePreviewTask.taskId);
+      if (latest) syncReview(latest);
+    }
     pipelineList.replaceChildren();
     if (!result.tasks.length) {
       pipelineSection.hidden = true;
@@ -1049,14 +1346,26 @@ async function loadPipeline() {
       const header = document.createElement('div');
       header.className = 'pipeline-card-header';
       const title = document.createElement('strong');
-      title.textContent = pipelineStateLabel(task.state);
+      title.textContent = task.resultAvailability && task.resultAvailability !== 'AVAILABLE'
+        ? ({ EXPIRED: 'Срок хранения истёк', MISSING: 'Файл недоступен', UNKNOWN: 'Проверяем доступность результата' }[task.resultAvailability] || 'Результат недоступен')
+        : pipelineStateLabel(task.state);
       const percent = document.createElement('span');
-      percent.textContent = `${Math.round(Number(task.percent) || 0)}%`;
+      const resultUnavailable = task.resultAvailability && task.resultAvailability !== 'AVAILABLE';
+      percent.textContent = resultUnavailable ? '' : `${Math.round(Number(task.percent) || 0)}%`;
       header.append(title, percent);
       const detail = document.createElement('p');
-      detail.textContent = task.detail || 'Ожидаем обновление';
+      detail.textContent = task.resultUnavailableReason || task.detail || 'Ожидаем обновление';
+      if (task.state === 'QUEUED' && workerStatus?.state === 'OFFLINE') {
+        detail.textContent = 'Видео сохранено. Ожидаем подключения обработчика; повторно загружать файл не нужно. Срок хранения ограничен.';
+      }
       const track = document.createElement('div');
       track.className = 'progress-track';
+      track.hidden = Boolean(resultUnavailable);
+      track.setAttribute('role', 'progressbar');
+      track.setAttribute('aria-label', 'Обработка ролика');
+      track.setAttribute('aria-valuemin', '0');
+      track.setAttribute('aria-valuemax', '100');
+      track.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, Number(task.percent) || 0))));
       const value = document.createElement('div');
       value.className = 'progress-value';
       value.style.width = `${Math.max(0, Math.min(100, Number(task.percent) || 0))}%`;
@@ -1072,6 +1381,38 @@ async function loadPipeline() {
         card.append(file);
       }
       card.append(detail, track, meta);
+      if (task.state === 'FAILED') {
+        const retryNote = document.createElement('p');
+        retryNote.className = 'review-status';
+        if (task.retryable === true) {
+          const retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'secondary-button';
+          retry.textContent = 'Повторить обработку';
+          const saved = retryStates.get(task.taskId);
+          retry.disabled = saved?.pending === true;
+          retryNote.textContent = saved?.message || 'Используем сохранённый исходник и проверенные этапы обработки.';
+          if (saved) { saved.node = retryNote; saved.button = retry; }
+          retry.addEventListener('click', async () => {
+            retry.disabled = true;
+            const pending = retryPipelineTask(task);
+            const current = retryStates.get(task.taskId);
+            if (current) { current.node = retryNote; current.button = retry; retryNote.textContent = current.message; }
+            await pending;
+            retry.disabled = false;
+          });
+          card.append(retry, retryNote);
+        } else if (task.retryReason) {
+          retryNote.textContent = ({
+            SOURCE_EXPIRED: 'Срок хранения исходника истёк. Для нового монтажа загрузите видео снова.',
+            SOURCE_MISSING: 'Сохранённый исходник недоступен. Для нового монтажа загрузите видео снова.',
+            SOURCE_UNKNOWN: 'Не удалось проверить исходник. Обновите статус чуть позже.',
+            ACTION_REQUIRES_REVIEW: 'Эта ошибка связана с правкой или подтверждением. Повтор требует проверки текущего результата.',
+            NOT_FAILED: 'Повтор сейчас не требуется.',
+          })[task.retryReason] || 'Повтор сейчас недоступен. Попробуйте обновить статус позже.';
+          card.append(retryNote);
+        }
+      }
       if (Array.isArray(task.candidates) && task.candidates.length) {
         const candidates = document.createElement('div');
         candidates.className = 'candidate-list';
@@ -1095,11 +1436,8 @@ async function loadPipeline() {
           const preview = document.createElement('button');
           preview.type = 'button';
           preview.className = 'preview-button';
-          preview.textContent = 'Смотреть ролик';
-          preview.addEventListener('click', () => {
-            previewVideo.src = task.previewUrl;
-            previewDialog.showModal();
-          });
+          preview.textContent = 'Смотреть и редактировать';
+          preview.addEventListener('click', () => openReview(task));
           links.append(preview);
         }
         if (task.downloadUrl) {
@@ -1116,44 +1454,71 @@ async function loadPipeline() {
       pipelineList.append(card);
     });
   } catch (error) {
+    if (requestedToken !== uploadToken) return;
     pipelineSection.hidden = false;
-    pipelineList.textContent = error.message;
+    if (pipelineNotice) {
+      pipelineNotice.hidden = false;
+      pipelineNotice.textContent = `${error.message} Последний полученный статус сохранён; попробуем обновить автоматически.`;
+    } else if (!pipelineList.children.length) pipelineList.textContent = error.message;
+  } finally {
+    if (pipelineLoading === requestedToken) pipelineLoading = false;
   }
 }
 
-async function handleSelectedFiles(fileList) {
+function handleSelectedFiles(fileList) {
   const selectedFiles = [...fileList];
-  if (!selectedFiles.length) return;
-
-  if (!uploadToken) {
-    pendingTasks.push(...addFiles(selectedFiles, false));
-    if (!projectConsent.checked) {
-      orderStatus.className = 'form-status error';
-      orderStatus.textContent = 'Файл выбран. Отметьте согласие на временное хранение — загрузка начнётся автоматически.';
-      orderSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return;
-    }
-    if (creatingProject) return;
-
-    try {
-      await createProject();
-      startPendingTasks();
-    } catch (error) {
-      orderStatus.className = 'form-status error';
-      orderStatus.textContent = error.message;
-      orderSubmit.hidden = false;
-      showPendingConnectionError(error.message);
-      return;
-    }
+  if (!selectedFiles.length || creatingProject) return;
+  const file = selectedFiles[0];
+  const problem = sourceProblem(file, maxFileSize);
+  if (problem) {
+    orderStatus.className = 'form-status error';
+    orderStatus.textContent = file.size > maxFileSize ? `Видео больше лимита ${formatBytes(maxFileSize)}.` : problem;
+    fileInput.value = '';
     return;
   }
-
-  addFiles(selectedFiles);
-  queueSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  clearSelectedSource();
+  selectedFile = file;
+  if (selectedSource) selectedSource.hidden = false;
+  if (sourceEmpty) sourceEmpty.hidden = true;
+  if (selectedSourceName) selectedSourceName.textContent = file.name;
+  if (selectedSourceMeta) selectedSourceMeta.textContent = `${formatBytes(file.size)} · ${fileKind(file.name)} · ещё не отправлено`;
+  if (selectedSourceVideo) {
+    sourceObjectUrl = URL.createObjectURL(file);
+    selectedSourceVideo.src = sourceObjectUrl;
+    selectedSourceVideo.hidden = false;
+  }
+  orderStatus.className = 'form-status';
+  orderStatus.textContent = selectedFiles.length > 1
+    ? 'Для одного проекта выбрано первое видео. Остальные можно оформить отдельными проектами.'
+    : 'Видео выбрано. Проверьте пожелания и нажмите «Начать монтаж».';
+  orderSubmit.hidden = false;
+  syncCreationState();
 }
 
 fileInput.addEventListener('change', () => handleSelectedFiles(fileInput.files));
-extraFileInput.addEventListener('change', () => handleSelectedFiles(extraFileInput.files));
+extraFileInput.addEventListener('change', () => {
+  if (!extraFileInput.files.length) return;
+  if (uploadToken) {
+    addFiles(extraFileInput.files);
+    queueSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else {
+    pendingTasks.push(...addFiles(extraFileInput.files, false));
+    orderStatus.textContent = 'Дополнительные материалы выбраны. Они отправятся после нажатия «Начать монтаж».';
+  }
+});
+document.querySelector('#removeSourceButton')?.addEventListener('click', () => {
+  clearSelectedSource();
+  orderStatus.textContent = '';
+});
+selectedSourceVideo?.addEventListener('loadedmetadata', () => {
+  if (!selectedFile || !selectedSourceMeta || !Number.isFinite(selectedSourceVideo.duration)) return;
+  const seconds = Math.round(selectedSourceVideo.duration);
+  selectedSourceMeta.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · ${formatBytes(selectedFile.size)} · ${fileKind(selectedFile.name)}`;
+});
+selectedSourceVideo?.addEventListener('error', () => {
+  selectedSourceVideo.hidden = true;
+  if (selectedFile && selectedSourceMeta) selectedSourceMeta.textContent = `${formatBytes(selectedFile.size)} · ${fileKind(selectedFile.name)} · предпросмотр недоступен в браузере, файл можно отправить`;
+});
 document.querySelectorAll('.mode-option').forEach((button) => {
   button.addEventListener('click', () => {
     processingMode.value = button.dataset.mode;
@@ -1162,16 +1527,40 @@ document.querySelectorAll('.mode-option').forEach((button) => {
       option.classList.toggle('selected', selected);
       option.setAttribute('aria-pressed', String(selected));
     });
+    updateModeHint();
   });
 });
 document.querySelector('#openSettings').addEventListener('click', () => settingsDialog.showModal());
+[faceTrackingEnabled, subtitlesEnabled, hookEnabled, ...aspectInputs].forEach((option) => {
+  option.addEventListener('change', updateProcessingSummary);
+});
 document.querySelectorAll('[data-close-dialog]').forEach((button) => {
   button.addEventListener('click', () => button.closest('dialog').close());
 });
 previewDialog.addEventListener('close', () => {
+  if (revisionTask) revisionDrafts.set(revisionTask.taskId, revisionText.value);
   previewVideo.pause();
   previewVideo.removeAttribute('src');
   previewVideo.load();
+});
+revisionText.addEventListener('input', () => {
+  if (revisionTask) revisionDrafts.set(revisionTask.taskId, revisionText.value);
+});
+previewRefresh?.addEventListener('click', () => {
+  if (!activePreviewTask?.previewUrl) return;
+  previewVideo.src = activePreviewTask.previewUrl;
+  activePreviewIdentity = previewIdentity(activePreviewTask);
+  previewRefresh.hidden = true;
+  revisionStatus.textContent = 'Открыта актуальная версия.';
+  syncReview(activePreviewTask);
+});
+previewVideo.addEventListener('error', () => {
+  if (!previewDialog.open) return;
+  if (previewState) previewState.textContent = 'Не удалось открыть видео. Обновите ссылку или скачайте файл.';
+  if (previewRefresh) previewRefresh.hidden = false;
+});
+previewApprove?.addEventListener('click', () => {
+  if (activePreviewTask && !previewApprove.disabled) openApproval(activePreviewTask, revisionStatus, [previewApprove, revisionSubmit]);
 });
 document.querySelectorAll('[data-suggestion]').forEach((button) => {
   button.addEventListener('click', () => {
@@ -1189,13 +1578,21 @@ revisionSubmit.addEventListener('click', async () => {
     revisionStatus.textContent = 'Напишите, что нужно изменить.';
     return;
   }
+  if (previewRevisionPending || revisionSubmit.disabled) return;
+  previewRevisionPending = true;
+  const submittedTask = revisionTask;
   const accepted = await sendPipelineAction(
     revisionTask,
     { kind: 'REVISION', requestText },
     revisionStatus,
     [revisionSubmit, revisionText],
   );
-  if (accepted) revisionDialog.close();
+  previewRevisionPending = false;
+  if (accepted) {
+    revisionDrafts.delete(submittedTask.taskId);
+    if (revisionTask?.taskId === submittedTask.taskId) revisionText.value = '';
+  }
+  if (activePreviewTask) syncReview(activePreviewTask);
 });
 
 approvalCancel.addEventListener('click', () => approvalDialog.close());
@@ -1274,7 +1671,11 @@ authForm.addEventListener('submit', async (event) => {
     authForm.reset();
     authDialog.close();
     renderAuthState();
-    await enterAccountDashboard();
+    if (selectedFile && !pendingClaimToken) {
+      showGuestStudio();
+      backToProjects.hidden = false;
+      syncCreationState();
+    } else await enterAccountDashboard();
   } catch (error) {
     authStatus.className = 'auth-status error';
     authStatus.textContent = accountErrorMessage(error);
@@ -1297,6 +1698,11 @@ document.addEventListener('click', (event) => {
 });
 
 logoutButton.addEventListener('click', async () => {
+  if (creatingProject || [...tasks].some((task) => ['connecting', 'uploading', 'finalizing'].includes(task.state))) {
+    logoutStatus.textContent = 'Файл ещё загружается. Дождитесь завершения или отмените загрузку перед выходом.';
+    logoutStatus.hidden = false;
+    return;
+  }
   logoutButton.disabled = true;
   logoutStatus.hidden = true;
   logoutStatus.textContent = '';
@@ -1337,6 +1743,7 @@ const openNewProject = () => startNewAccountProject().catch((error) => {
 newProjectNav.addEventListener('click', openNewProject);
 newProjectButton.addEventListener('click', openNewProject);
 emptyNewProjectButton.addEventListener('click', openNewProject);
+document.querySelector('#anotherProjectButton')?.addEventListener('click', openNewProject);
 projectsNav.addEventListener('click', enterAccountDashboard);
 backToProjects.addEventListener('click', enterAccountDashboard);
 brandButton.addEventListener('click', async () => {
@@ -1347,20 +1754,21 @@ brandButton.addEventListener('click', async () => {
   }
 });
 addFilesButton.addEventListener('click', () => {
-  workspace.hidden = !workspace.hidden;
-  addFilesButton.textContent = workspace.hidden ? 'Добавить файл' : 'Скрыть загрузку';
-  if (!workspace.hidden) workspace.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  extraFileInput.click();
 });
 
-projectConsent.addEventListener('change', async () => {
-  if (!projectConsent.checked || !pendingTasks.length || uploadToken || creatingProject) return;
-  try {
-    await createProject();
-    startPendingTasks();
-  } catch (error) {
-    orderSubmit.hidden = false;
-    showPendingConnectionError(error.message);
-  }
+projectConsent.addEventListener('change', syncCreationState);
+projectSearch?.addEventListener('input', () => renderProjects(projectCache));
+document.querySelectorAll('[data-project-filter]').forEach((button) => {
+  button.addEventListener('click', () => {
+    projectFilter = button.dataset.projectFilter;
+    document.querySelectorAll('[data-project-filter]').forEach((option) => {
+      const active = option === button;
+      option.classList.toggle('active', active);
+      option.setAttribute('aria-pressed', String(active));
+    });
+    renderProjects(projectCache);
+  });
 });
 
 for (const eventName of ['dragenter', 'dragover']) {
@@ -1393,25 +1801,26 @@ async function createProject() {
   if (uploadToken) return;
   if (creatingProject) return;
   creatingProject = true;
-  orderSubmit.disabled = true;
+  syncCreationState();
   orderStatus.className = 'form-status';
   orderStatus.textContent = 'Создаём защищённый проект…';
   try {
     const accountProject = Boolean(currentUser && authEnabled && accountIsSameOrigin);
-    const result = await api('/api/jobs', {
+    const result = await api(accountProject ? '/api/projects' : '/api/jobs', {
       method: 'POST',
       timeoutMs: 15000,
       projectAuth: !accountProject,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         quickStart: true,
-        title: pendingTasks[0]?.file?.name || 'Новый ролик',
+        title: selectedFile?.name || 'Новый ролик',
         customerName: customerName.value,
         contact: customerContact.value,
         projectType: projectType.value,
         comment: projectComment.value,
         processing: {
           mode: processingMode.value,
+          aspectRatio: selectedAspectRatio(),
           faceTrackingEnabled: faceTrackingEnabled.checked,
           subtitlesEnabled: subtitlesEnabled.checked,
           hookEnabled: hookEnabled.checked,
@@ -1419,7 +1828,8 @@ async function createProject() {
         },
       }),
     });
-    uploadToken = result.token;
+    if (accountProject && !result.project) throw new Error('Сервис не подтвердил сохранение проекта в кабинете. Загрузка не запущена.');
+    uploadToken = result.token || result.jobToken;
     if (!uploadToken) throw new Error('Сервис не выдал доступ к новому проекту.');
     sessionStorage.setItem('montage-upload-link-token', uploadToken);
     if (!accountIsSameOrigin && authEnabled) {
@@ -1427,16 +1837,10 @@ async function createProject() {
       loginButton.title = 'Откроется защищённая версия MontageAI, где ролик можно добавить в аккаунт';
     }
     if (currentUser) {
-      currentProject = result.project || {
-        id: result.projectId,
-        jobId: result.jobId,
-        title: pendingTasks[0]?.file?.name || 'Новый ролик',
-        processing: { mode: processingMode.value },
-        createdAt: new Date().toISOString(),
-      };
+      currentProject = result.project;
       projectContext.hidden = false;
       projectContextTitle.textContent = projectName(currentProject);
-      projectContextMeta.textContent = `${processingMode.value.toUpperCase()} · создаётся`;
+      projectContextMeta.textContent = `${processingMode.value.toUpperCase()} · ${selectedAspectRatio()} · создаётся`;
     }
     orderStatus.className = 'form-status success';
     orderStatus.textContent = 'Проект создан. Открываем загрузку…';
@@ -1444,22 +1848,39 @@ async function createProject() {
     void Promise.allSettled([checkHealth(), loadFiles(), loadPipeline()]);
     if (!pendingTasks.length) dropzone.scrollIntoView({ behavior: 'smooth', block: 'center' });
   } catch (error) {
+    if (error.status === 401 && currentUser) {
+      // Keep the account intent: another click must not silently create a guest job.
+      loginButton.hidden = false;
+      loginButton.textContent = 'Войти снова';
+      error.message = 'Сессия истекла. Войдите в аккаунт снова, чтобы сохранить ролик в кабинете. Видео пока не отправлено.';
+    }
     orderStatus.className = 'form-status error';
     orderStatus.textContent = error.message;
     orderSubmit.hidden = false;
     throw error;
   } finally {
     creatingProject = false;
-    orderSubmit.disabled = false;
+    syncCreationState();
   }
 }
 
 orderForm.addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (creatingProject) return;
+  if (!canStartCreation({ file: selectedFile, consent: projectConsent.checked, busy: creatingProject, maxFileSize })) return;
+  const source = selectedFile;
   try {
     await createProject();
+    pendingTasks.unshift(...addFiles([source], false));
     startPendingTasks();
+    clearSelectedSource();
+    workspace.hidden = true;
+    projectContext.hidden = false;
+    projectContextTitle.textContent = projectName(currentProject || { title: source.name });
+    projectContextMeta.textContent = 'Передаём видео · затем начнётся монтаж';
+    backToProjects.hidden = !currentUser;
+    addFilesButton.hidden = false;
+    const anotherProjectButton = document.querySelector('#anotherProjectButton');
+    if (anotherProjectButton) anotherProjectButton.hidden = false;
   } catch {
     // createProject already shows a user-friendly error.
     showPendingConnectionError(orderStatus.textContent);
@@ -1477,6 +1898,8 @@ saveToken.addEventListener('click', async () => {
 
 async function initialize() {
   updateEmptyState();
+  updateModeHint();
+  syncCreationState();
   await checkHealth();
   await initializeAuth();
   if (!projectShell.hidden && apiAvailable && (!serverProtected || uploadToken)) await loadFiles();
@@ -1486,5 +1909,9 @@ async function initialize() {
 
 initialize();
 setInterval(() => {
-  if (uploadToken && !document.hidden) loadPipeline();
+  if (document.hidden) return;
+  if (currentUser && !accountDashboard.hidden) {
+    loadAccountProjects({ preserveMessage: true, background: true });
+  } else if (uploadToken) loadPipeline();
 }, 5000);
+setInterval(() => { if (!document.hidden) void refreshWorkerHealth(); }, 30000);

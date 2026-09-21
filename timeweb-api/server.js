@@ -32,6 +32,8 @@ import {
   serializeSessionCookie,
 } from './accounts.js';
 import { validateAccountEnvironment } from './postgres.js';
+import { checkResultAvailability, createProjectStatusReader } from './project-status.js';
+import { PipelineError, createPipelineRuntime, createTaskLock, publicPipelineStatus } from './pipeline-runtime.js';
 
 const DEFAULT_MAX_FILE_SIZE = 1024 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE = 10 * 1024 * 1024;
@@ -48,6 +50,7 @@ const DEFAULT_ACCOUNT_PROJECT_WINDOW_SECONDS = 60 * 60;
 const DEFAULT_ACCOUNT_PROJECT_QUOTA = 200;
 const DEFAULT_RATE_LIMIT_RETENTION_HOURS = 7 * 24;
 const PROCESSABLE_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv']);
+const OUTPUT_ASPECT_RATIOS = new Set(['9:16', '1:1', '16:9']);
 export function isProcessableVideoFile(name) {
   return PROCESSABLE_VIDEO_EXTENSIONS.has(path.extname(name).toLowerCase());
 }
@@ -167,8 +170,13 @@ async function configureBucketCors(s3, bucket, env) {
 
 function processingOptions(value = {}) {
   const input = value && typeof value === 'object' ? value : {};
+  const aspectRatio = Object.hasOwn(input, 'aspectRatio') ? input.aspectRatio : '9:16';
+  if (!OUTPUT_ASPECT_RATIOS.has(aspectRatio)) {
+    throw new HttpError(400, 'Выберите формат видео: 9:16, 1:1 или 16:9');
+  }
   return {
     mode: input.mode === 'long' ? 'long' : 'short',
+    aspectRatio,
     faceTrackingEnabled: input.faceTrackingEnabled !== false,
     subtitlesEnabled: input.subtitlesEnabled !== false,
     hookEnabled: input.hookEnabled !== false,
@@ -210,10 +218,7 @@ function actionKey(jobId, actionId) {
 }
 
 function actionIsAvailable(action) {
-  if (action?.state === 'PENDING') return true;
-  const updatedAt = Date.parse(String(action?.updatedAt ?? ''));
-  return action?.state === 'PROCESSING'
-    && (!Number.isFinite(updatedAt) || Date.now() - updatedAt > 2 * 60 * 60 * 1000);
+  return action?.state === 'PENDING';
 }
 
 async function objectJson(s3, bucket, key) {
@@ -514,6 +519,9 @@ export function createApp(options = {}) {
   const s3 = options.s3 ?? createS3(env);
   const signUrl = options.getSignedUrl ?? getSignedUrl;
   const bucket = env.S3_BUCKET;
+  const projectStatusReader = createProjectStatusReader({
+    s3, bucket, retentionHours: integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS),
+  });
   const configuredAccountStore = String(env.ACCOUNT_STORE ?? '').trim().toLowerCase();
   if (!Object.hasOwn(options, 'accountStore')) validateAccountEnvironment(env);
   const accountStore = Object.hasOwn(options, 'accountStore')
@@ -527,6 +535,12 @@ export function createApp(options = {}) {
     sessionLifetimeSeconds: integer(env.SESSION_LIFETIME_HOURS, 30 * 24) * 60 * 60,
     ...(options.now ? { now: options.now } : {}),
   }) : null);
+  const pipelineRuntime = createPipelineRuntime({
+    s3, bucket,
+    withLock: options.pipelineLock ?? createTaskLock(accountStore?.pool, { allowMemory: env.NODE_ENV !== 'production' }),
+    retentionHours: integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS),
+    ...(options.pipelineNow ? { now: options.pipelineNow } : {}),
+  });
   const app = express();
   const jobRequests = new Map();
   const accountRateLimits = {
@@ -753,13 +767,14 @@ export function createApp(options = {}) {
     response.setHeader('Cache-Control', 'no-store');
     const { user } = await requireAccount(request);
     const projects = await accountStore.listProjects(user.id);
-    response.json({ ok: true, projects: projects.map(publicProject) });
+    response.json({ ok: true, projects: await projectStatusReader.enrich(projects.map(publicProject)) });
   }));
 
   app.post('/api/projects', asyncRoute(async (request, response) => {
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     assertAccountMutationOrigin(request);
     const { user } = await requireAccount(request);
+    const processing = processingOptions(request.body?.processing);
     await enforceProjectCreationLimit(user.id);
     const now = new Date();
     const pendingProject = {
@@ -768,7 +783,7 @@ export function createApp(options = {}) {
       jobId: `web-${crypto.randomUUID()}`,
       title: projectTitle(request.body?.title),
       source: 'account',
-      processing: processingOptions(request.body?.processing),
+      processing,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
     };
@@ -833,7 +848,8 @@ export function createApp(options = {}) {
     const projectId = safeIdentifier(request.params.projectId, 'projectId');
     const project = await findOwnedProject(projectId, user.id);
     if (!project) throw new HttpError(404, 'Проект не найден');
-    response.json({ ok: true, project: publicProject(project) });
+    const [withStatus] = await projectStatusReader.enrich([publicProject(project)], { all: true });
+    response.json({ ok: true, project: withStatus });
   }));
 
   app.post('/api/projects/:projectId/access', asyncRoute(async (request, response) => {
@@ -843,10 +859,11 @@ export function createApp(options = {}) {
     const project = await findOwnedProject(projectId, user.id);
     if (!project) throw new HttpError(404, 'Проект не найден');
     const access = createAccountJobAccess(project, env);
+    const [withStatus] = await projectStatusReader.enrich([publicProject(project)], { all: true });
     response.setHeader('Cache-Control', 'no-store');
     response.json({
       ok: true,
-      project: publicProject(project),
+      project: withStatus,
       jobToken: access.token,
       token: access.token,
       jobTokenExpiresAt: access.expiresAt,
@@ -863,6 +880,7 @@ export function createApp(options = {}) {
     const quickStart = input.quickStart === true;
     if (!quickStart && customerName.length < 2) throw new HttpError(400, 'Укажите ваше имя');
     if (!quickStart && contact.length < 3) throw new HttpError(400, 'Укажите Telegram, email или другой контакт');
+    const processing = processingOptions(input.processing);
 
     const now = Date.now();
     const requester = request.ip || request.socket.remoteAddress || 'unknown';
@@ -871,7 +889,6 @@ export function createApp(options = {}) {
     recent.push(now);
     jobRequests.set(requester, recent);
 
-    const processing = processingOptions(input.processing);
     const authenticated = accountService
       ? await accountService.authenticate(accountCookieToken(request))
       : null;
@@ -939,6 +956,8 @@ export function createApp(options = {}) {
     response.status(ready ? 200 : 503).json({
       ok: ready,
       cloud: true,
+      release: 'studio-20260922-recovery-v1',
+      recoveryAvailable: Boolean(accountStore?.pool) || env.NODE_ENV !== 'production',
       provider: 'timeweb-s3',
       protected: true,
       accountsConfigured: Boolean(accountService),
@@ -949,6 +968,7 @@ export function createApp(options = {}) {
       maxFileSize: integer(env.MAX_FILE_SIZE_BYTES, DEFAULT_MAX_FILE_SIZE),
       chunkSize: Math.max(integer(env.CHUNK_SIZE_BYTES, DEFAULT_CHUNK_SIZE), 5 * 1024 * 1024),
       retentionHours: integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS),
+      worker: await pipelineRuntime.worker(),
     });
   }));
 
@@ -1134,6 +1154,7 @@ export function createApp(options = {}) {
   }));
 
   app.get('/api/pipeline', asyncRoute(async (request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
     const job = jobFromRequest(request);
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const objects = await listPrefix(s3, bucket, `.status/${job.jobId}/`);
@@ -1144,10 +1165,25 @@ export function createApp(options = {}) {
       if (action.jobId === job.jobId) actions.push(action);
     }
     const tasks = [];
+    const resultCheckSignal = AbortSignal.timeout(8_000);
     for (const object of objects) {
-      const status = await objectJson(s3, bucket, object.Key);
+      const status = publicPipelineStatus(await objectJson(s3, bucket, object.Key));
       if (status.jobId !== job.jobId) continue;
-      if (status.resultKey && ['READY_FOR_REVIEW', 'APPROVED'].includes(status.state)) {
+      // URLs are generated only from a verified object, never from stored JSON.
+      delete status.previewUrl;
+      delete status.downloadUrl;
+      if (['READY_FOR_REVIEW', 'APPROVED'].includes(status.state)) {
+        const availability = await checkResultAvailability({
+          s3, bucket, status, jobId: job.jobId, statusModifiedAt: object.LastModified,
+          retentionHours: integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS),
+          signal: resultCheckSignal,
+        });
+        status.resultAvailability = availability.state;
+        status.resultExpiresAt = availability.expiresAt;
+        status.resultUnavailableReason = availability.reason;
+      }
+      if (['READY_FOR_REVIEW', 'APPROVED'].includes(status.state)
+          && status.resultAvailability === 'AVAILABLE') {
         status.previewUrl = await signUrl(
           s3,
           new GetObjectCommand({ Bucket: bucket, Key: status.resultKey }),
@@ -1167,16 +1203,30 @@ export function createApp(options = {}) {
       status.action = actions
         .filter((action) => action.taskId === status.taskId)
         .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] ?? null;
+      try { Object.assign(status, await pipelineRuntime.retryInfo(job.jobId, status.taskId, status)); }
+      catch { Object.assign(status, { retryable: false, retryReason: 'SOURCE_UNKNOWN' }); }
       tasks.push(status);
     }
     tasks.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-    response.json({ ok: true, tasks });
+    response.json({ ok: true, tasks, worker: await pipelineRuntime.worker() });
+  }));
+
+  app.post('/api/pipeline/:taskId/retry', asyncRoute(async (request, response) => {
+    const job = jobFromRequest(request);
+    const taskId = safeIdentifier(request.params.taskId, 'taskId');
+    response.json(await pipelineRuntime.retry(job.jobId, taskId));
+  }));
+
+  app.post('/api/worker/heartbeat', asyncRoute(async (request, response) => {
+    requireWorker(request, env);
+    response.json(await pipelineRuntime.heartbeat(request.body ?? {}));
   }));
 
   app.post('/api/pipeline/:taskId/actions', asyncRoute(async (request, response) => {
     const job = jobFromRequest(request);
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const taskId = safeIdentifier(request.params.taskId, 'taskId');
+    const createdAction = await pipelineRuntime.withTask(job.jobId, taskId, async () => {
     const status = await objectJson(s3, bucket, statusKey(job.jobId, taskId));
     if (status.jobId !== job.jobId || status.taskId !== taskId) {
       throw new HttpError(409, 'Ролик не принадлежит этой заявке');
@@ -1192,10 +1242,26 @@ export function createApp(options = {}) {
     if (kind === 'APPROVE' && request.body?.confirmation !== 'APPROVE') {
       throw new HttpError(400, 'Нужно явно подтвердить выбранный preview');
     }
+    const availability = await checkResultAvailability({
+      s3,
+      bucket,
+      status,
+      jobId: job.jobId,
+      retentionHours: integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS),
+    });
+    if (availability.state !== 'AVAILABLE') {
+      if (availability.state === 'EXPIRED') {
+        throw new HttpError(410, 'Срок хранения preview истёк');
+      }
+      if (availability.state === 'UNKNOWN') {
+        throw new HttpError(503, 'Не удалось проверить доступность preview');
+      }
+      throw new HttpError(409, 'Файл preview недоступен');
+    }
     const existingObjects = await listPrefix(s3, bucket, `.actions/${job.jobId}/`);
     for (const object of existingObjects) {
       const existing = await objectJson(s3, bucket, object.Key);
-      if (existing.taskId === taskId && actionIsAvailable(existing)) {
+      if (existing.taskId === taskId && ['PENDING', 'PROCESSING'].includes(existing.state)) {
         throw new HttpError(409, 'Предыдущее действие ещё выполняется');
       }
     }
@@ -1211,6 +1277,7 @@ export function createApp(options = {}) {
       taskId,
       localJobId: status.localJobId,
       resultKey: status.resultKey || null,
+      resultAttemptId: status.resultAttemptId || null,
       kind,
       previousState: status.state,
       requestText: kind === 'APPROVE' ? 'Всё хорошо, подтверждаю этот preview' : requestText,
@@ -1220,7 +1287,9 @@ export function createApp(options = {}) {
     };
     if (!action.localJobId) throw new HttpError(409, 'Локальный job ещё не привязан');
     await putJson(s3, bucket, actionKey(job.jobId, actionId), action);
-    response.status(202).json({ ok: true, action });
+    return action;
+    });
+    response.status(202).json({ ok: true, action: createdAction });
   }));
 
   app.get('/api/worker/tasks', asyncRoute(async (request, response) => {
@@ -1240,12 +1309,9 @@ export function createApp(options = {}) {
       } catch (error) {
         if (error?.name !== 'NoSuchKey') throw error;
       }
-      const updatedAt = Date.parse(String(status?.updatedAt ?? ''));
-      const processingIsStale = status?.state === 'PROCESSING'
-        && (!Number.isFinite(updatedAt) || Date.now() - updatedAt > 2 * 60 * 60 * 1000);
       if (failedTaskId) {
         if (status?.state === 'FAILED') tasks.push(task);
-      } else if (!status || status.state === 'QUEUED' || processingIsStale) {
+      } else if (!status || status.state === 'QUEUED' || pipelineRuntime.recoverable(status)) {
         tasks.push(task);
       }
     }
@@ -1270,13 +1336,25 @@ export function createApp(options = {}) {
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const actionId = safeIdentifier(request.params.actionId, 'actionId');
     const jobId = safeIdentifier(request.body?.jobId, 'jobId');
-    const action = await objectJson(s3, bucket, actionKey(jobId, actionId));
-    if (action.actionId !== actionId || action.jobId !== jobId || !actionIsAvailable(action)) {
-      throw new HttpError(409, 'Действие уже выполняется или завершено');
-    }
-    action.state = 'PROCESSING';
-    action.updatedAt = new Date().toISOString();
-    await putJson(s3, bucket, actionKey(jobId, actionId), action);
+    const pending = await objectJson(s3, bucket, actionKey(jobId, actionId));
+    const workerId = safeIdentifier(request.body?.workerId, 'workerId');
+    const action = await pipelineRuntime.withTask(jobId, pending.taskId, async () => {
+      const current = await pipelineRuntime.read(actionKey(jobId, actionId));
+      if (current.state === 'PROCESSING' && current.workerId === workerId) return current;
+      if (current.actionId !== actionId || current.jobId !== jobId || !actionIsAvailable(current)) {
+        throw new HttpError(409, 'Действие уже выполняется или завершено');
+      }
+      current.state = 'PROCESSING';
+      current.workerId = workerId;
+      current.updatedAt = new Date().toISOString();
+      await pipelineRuntime.write(actionKey(jobId, actionId), current);
+      const status = await pipelineRuntime.status(jobId, current.taskId);
+      await pipelineRuntime.write(statusKey(jobId, current.taskId), {
+        ...status, state: 'PROCESSING', operationType: current.kind, activeActionId: actionId,
+        stage: 'action', detail: 'Выполняю правку или подтверждение', updatedAt: current.updatedAt,
+      });
+      return current;
+    });
     response.json({ ok: true, action });
   }));
 
@@ -1285,16 +1363,29 @@ export function createApp(options = {}) {
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const actionId = safeIdentifier(request.params.actionId, 'actionId');
     const jobId = safeIdentifier(request.body?.jobId, 'jobId');
-    const action = await objectJson(s3, bucket, actionKey(jobId, actionId));
+    const pending = await objectJson(s3, bucket, actionKey(jobId, actionId));
     const state = String(request.body?.state ?? '').toUpperCase();
     if (!ACTION_STATES.has(state) || !['COMPLETE', 'FAILED'].includes(state)) {
       throw new HttpError(400, 'Некорректный результат действия');
     }
-    action.state = state;
-    action.detail = shortText(request.body?.detail, 300);
-    action.updatedAt = new Date().toISOString();
-    action.completedAt = new Date().toISOString();
-    await putJson(s3, bucket, actionKey(jobId, actionId), action);
+    const workerId = safeIdentifier(request.body?.workerId, 'workerId');
+    const action = await pipelineRuntime.withTask(jobId, pending.taskId, async () => {
+      const current = await pipelineRuntime.read(actionKey(jobId, actionId));
+      if (current.workerId !== workerId) throw new HttpError(409, 'Действие принадлежит другому обработчику');
+      if (current.state === state) return current;
+      if (current.state !== 'PROCESSING') throw new HttpError(409, 'Действие уже завершено');
+      current.state = state;
+      current.detail = shortText(request.body?.detail, 300);
+      current.updatedAt = new Date().toISOString();
+      current.completedAt = current.updatedAt;
+      await pipelineRuntime.write(actionKey(jobId, actionId), current);
+      const status = await pipelineRuntime.status(jobId, current.taskId);
+      if (state === 'FAILED' && status?.state === 'PROCESSING' && status.activeActionId === actionId) {
+        await pipelineRuntime.write(statusKey(jobId, current.taskId), { ...status, state: 'FAILED',
+          stage: 'action_unconfirmed', detail: 'Результат правки не подтверждён. Требуется проверка; повтор не запускался', updatedAt: current.updatedAt });
+      }
+      return current;
+    });
     response.json({ ok: true, action });
   }));
 
@@ -1303,24 +1394,14 @@ export function createApp(options = {}) {
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const taskId = safeIdentifier(request.params.taskId, 'taskId');
     const jobId = safeIdentifier(request.body?.jobId, 'jobId');
-    const task = await objectJson(s3, bucket, queueKey(jobId, taskId));
-    if (task.taskId !== taskId || task.jobId !== jobId) throw new HttpError(409, 'Задача не совпадает');
-    await putJson(s3, bucket, statusKey(jobId, taskId), {
-      version: 1,
-      jobId,
-      taskId,
-      state: 'PROCESSING',
-      percent: 1,
-      stage: 'download',
-      detail: 'Локальная машина забирает исходник',
-      updatedAt: new Date().toISOString(),
-    });
+    const claimed = await pipelineRuntime.claim(jobId, taskId, request.body?.workerId);
+    const { task } = claimed;
     const downloadUrl = await signUrl(
       s3,
       new GetObjectCommand({ Bucket: bucket, Key: task.objectKey }),
       { expiresIn: 60 * 60 },
     );
-    response.json({ ok: true, task, downloadUrl });
+    response.json({ ok: true, ...claimed, downloadUrl });
   }));
 
   app.post('/api/worker/tasks/:taskId/status', asyncRoute(async (request, response) => {
@@ -1353,8 +1434,8 @@ export function createApp(options = {}) {
         reason: shortText(candidate?.selection_reason || candidate?.reason, 300),
       }));
     }
-    await putJson(s3, bucket, statusKey(jobId, taskId), status);
-    response.json({ ok: true, status });
+    const updated = await pipelineRuntime.update(jobId, taskId, request.body ?? {}, status);
+    response.json({ ok: true, status: updated });
   }));
 
   app.post('/api/worker/tasks/:taskId/result-upload', asyncRoute(async (request, response) => {
@@ -1362,7 +1443,7 @@ export function createApp(options = {}) {
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const taskId = safeIdentifier(request.params.taskId, 'taskId');
     const jobId = safeIdentifier(request.body?.jobId, 'jobId');
-    const resultKey = `.results/${jobId}/${taskId}.mp4`;
+    const resultKey = await pipelineRuntime.resultUpload(jobId, taskId, request.body ?? {});
     const uploadUrl = await signUrl(
       s3,
       new PutObjectCommand({ Bucket: bucket, Key: resultKey, ContentType: 'video/mp4' }),
@@ -1463,8 +1544,9 @@ export function createApp(options = {}) {
       next(error);
       return;
     }
-    if (!(error instanceof HttpError) && !(error instanceof AccountError)) console.error(error);
-    const status = error instanceof HttpError || error instanceof AccountError ? error.status : 500;
+    const publicError = error instanceof HttpError || error instanceof AccountError || error instanceof PipelineError;
+    if (!publicError) console.error(error);
+    const status = publicError ? error.status : 500;
     if (error instanceof AccountRateLimitError) {
       response.setHeader('Retry-After', String(error.retryAfterSeconds));
     }

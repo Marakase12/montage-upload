@@ -4,16 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light">
+  <meta name="montage-release" content="studio-20260922-recovery-v1">
   <meta name="description" content="Загрузите видео, следите за обработкой и получите готовый ролик в MontageAI">
   <title>MontageAI — личная видеостудия</title>
-  <link rel="stylesheet" href="./studio.css?v=account-v1">
+  <meta name="theme-color" content="#f6f5f1">
+  <link rel="stylesheet" href="./studio.css?v=studio-20260922-recovery-v1">
 </head>
 <body class="app-booting">
   <main class="shell">
     <header class="topbar">
       <button class="brand" id="brandButton" type="button" aria-label="MontageAI, главная">
-        <span class="brand-mark" aria-hidden="true">M</span>
-        <span>MontageAI</span>
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M7 23V9l9 8 9-8v14M16 17v6" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        <span>Montage<span class="brand-ai">AI</span></span>
       </button>
 
       <div class="topbar-actions">
@@ -28,7 +30,7 @@
 
         <button class="login-button" id="loginButton" type="button" hidden>Войти</button>
         <div class="account-menu" id="accountMenu" hidden>
-          <button class="account-trigger" id="accountMenuButton" type="button" aria-expanded="false" aria-controls="accountPopover">
+          <button class="account-trigger" id="accountMenuButton" type="button" aria-label="Меню профиля" aria-expanded="false" aria-controls="accountPopover">
             <span class="avatar" id="userAvatar" aria-hidden="true">M</span>
             <span class="account-trigger-copy"><strong id="userLabel">Профиль</strong><small>Аккаунт</small></span>
             <span aria-hidden="true">⌄</span>
@@ -46,18 +48,27 @@
     <section class="account-dashboard" id="accountDashboard" aria-labelledby="accountTitle" hidden>
       <div class="dashboard-heading">
         <div>
-          <span class="eyebrow">Личная видеостудия</span>
+          <span class="eyebrow">Ваше пространство</span>
           <h1 id="accountTitle">Мои ролики</h1>
-          <p>Здесь находятся загрузки, текущая обработка и готовые видео.</p>
+          <p>От первой идеи до последнего штриха. Всё в одном месте.</p>
         </div>
         <button class="primary-button new-video-button" id="newProjectButton" type="button">+ Новый ролик</button>
       </div>
 
+      <div class="library-toolbar">
+        <div class="library-filters" role="group" aria-label="Показать ролики">
+          <button type="button" class="selected" data-project-filter="all" aria-pressed="true">Все ролики <span id="projectCount"></span></button>
+          <button type="button" data-project-filter="working" aria-pressed="false">В работе</button>
+          <button type="button" data-project-filter="ready" aria-pressed="false">Готовые</button>
+        </div>
+        <label class="project-search"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><input id="projectSearch" type="search" placeholder="Найти ролик" aria-label="Найти ролик по названию"></label>
+      </div>
       <div class="account-message" id="accountMessage" role="status" hidden></div>
       <div class="project-skeletons" id="projectSkeletons" aria-label="Загружаем ролики" hidden>
         <span></span><span></span><span></span>
       </div>
       <div class="projects-grid" id="projectsList" aria-live="polite"></div>
+      <button id="projectsLoadMore" class="secondary-button load-more" type="button" hidden>Показать ещё</button>
       <div class="account-empty" id="projectsEmpty" hidden>
         <span class="empty-illustration" aria-hidden="true">▶</span>
         <h2>Первый ролик начинается здесь</h2>
@@ -74,79 +85,93 @@
           <strong id="projectContextTitle">Новый ролик</strong>
         </div>
         <button class="secondary-button compact-button" id="addFilesButton" type="button" hidden>Добавить файл</button>
+        <button class="primary-button compact-button" id="anotherProjectButton" type="button" hidden>+ Новый ролик</button>
       </div>
 
       <div class="access-banner" id="accessBanner" role="status" data-state="locked">
         <span class="access-icon" aria-hidden="true">●</span>
         <div>
           <strong id="accessTitle">Подготавливаем рабочее пространство</strong>
-          <span id="accessText">Выберите видео — проект создастся автоматически.</span>
+          <span id="accessText">Выберите видео и нажмите «Начать монтаж», когда будете готовы.</span>
         </div>
       </div>
 
       <section class="workspace" id="workspace" aria-labelledby="workspaceTitle">
+        <p id="workerNotice" class="worker-notice" role="status" hidden></p>
         <div class="workspace-heading">
-          <span class="eyebrow">Новый ролик</span>
-          <h1 id="workspaceTitle">Видео — в работу</h1>
-          <p>Выберите исходник. Ход обработки и готовый результат появятся на этой странице.</p>
+          <div><span class="eyebrow"><span class="tiny-spark" aria-hidden="true">✳</span> Личная видеостудия</span>
+          <h1 id="workspaceTitle">Ваши идеи.<br><span>Наш монтаж.</span></h1>
+          <p>Добавьте видео, выберите оформление.<br class="desktop-break"> Мы подготовим ролик, а последние штрихи — за вами.</p></div>
+          <div class="creation-path" aria-label="Как это работает"><span><b>01</b> Ваше видео</span><span><b>02</b> Немного магии</span><span><b>03</b> Готовый ролик</span></div>
         </div>
 
         <div class="studio-layout">
+          <section class="upload-panel" aria-labelledby="uploadTitle">
+            <div class="panel-heading"><span class="step-number">01</span><h2 id="uploadTitle">Начнём с видео</h2><span class="panel-aside">MP4 · MOV · MKV</span></div>
+            <div id="sourceEmpty">
+              <div id="dropzone" class="dropzone">
+                <input id="fileInput" class="drop-input" type="file" aria-label="Выбрать одно видео из Фото или Файлов" accept="video/*,.mp4,.mov,.mkv">
+                <span class="drop-art" aria-hidden="true"><span class="film-card film-back"></span><span class="film-card film-front"><svg viewBox="0 0 48 48" fill="none"><path d="m20 16 13 8-13 8V16Z" fill="currentColor"/></svg></span><span class="drop-plus">+</span></span>
+                <strong>Выбрать видео</strong>
+                <span>Из «Фото» или «Файлов» на телефоне<br>или перетащите файл сюда</span>
+                <small>До <b id="limitValue">5 ГБ</b> · исходник останется без изменений</small>
+              </div>
+            </div>
+            <div id="selectedSource" class="selected-source" hidden>
+              <div class="source-player"><video id="selectedSourceVideo" controls playsinline preload="metadata" aria-label="Предпросмотр выбранного исходника"></video><span class="source-local">Ещё не загружено</span></div>
+              <div class="source-details"><div><strong id="selectedSourceName"></strong><span id="selectedSourceMeta"></span></div><button id="removeSourceButton" class="icon-button" type="button" aria-label="Убрать выбранное видео">×</button></div>
+              <p class="source-hint">Всё верно? Выберите оформление и начните монтаж.</p>
+            </div>
+            <details class="upload-extras"><summary>Дополнительные файлы <span aria-hidden="true">+</span></summary><div class="upload-aux">
+              <div class="extra-pick">
+                <input id="extraFileInput" class="drop-input" type="file" multiple aria-label="Добавить другие файлы" accept=".mp4,.mov,.mkv,.webm,.avi,.mxf,.wav,.mp3,.m4a,.aac,.flac,.ogg,.png,.jpg,.jpeg,.webp,.gif,.zip,.7z,.rar,.txt,.md,.json">
+                <span>Выбрать файлы</span>
+              </div>
+              <span>Музыка, изображения или материалы к ролику</span>
+            </div></details>
+            <span id="chunkValue" hidden></span><span id="storageValue" hidden></span>
+            <button class="token-toggle" id="tokenToggle" type="button" hidden>Ключ доступа</button>
+            <div class="token-box" id="tokenBox" hidden><label for="tokenInput">Ключ сервера</label><input id="tokenInput" type="password" autocomplete="off" placeholder="Ключ сервера"><button id="saveToken" type="button">Сохранить</button></div>
+          </section>
           <section class="order-section" id="orderSection" aria-labelledby="orderTitle">
             <form id="orderForm" class="order-form">
               <input id="projectType" name="projectType" type="hidden" value="shorts">
               <input id="processingMode" name="processingMode" type="hidden" value="short">
-              <h2 id="orderTitle">Что сделать?</h2>
+              <div class="panel-heading"><span class="step-number">02</span><h2 id="orderTitle">Каким будет результат?</h2></div>
               <div class="mode-options" role="group" aria-label="Режим обработки">
                 <button class="mode-option selected" type="button" data-mode="short" aria-pressed="true">
-                  <span class="mode-icon" aria-hidden="true">▶</span>
-                  <strong>Готовый Reel</strong>
-                  <small>Один ролик целиком</small>
+                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="6" y="3" width="12" height="18" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="m10 9 5 3-5 3V9Z" fill="currentColor"/></svg></span>
+                  <strong>Оформить целиком</strong>
+                  <small>Один готовый ролик</small>
                 </button>
                 <button class="mode-option" type="button" data-mode="long" aria-pressed="false">
-                  <span class="mode-icon" aria-hidden="true">▦</span>
-                  <strong>Нарезать длинное</strong>
-                  <small>Найти сильные моменты</small>
+                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="2" y="6" width="7" height="13" rx="2" stroke="currentColor" stroke-width="1.7"/><rect x="12" y="3" width="10" height="16" rx="2" stroke="currentColor" stroke-width="1.7"/><path d="m16 8 3 3-3 3" stroke="currentColor" stroke-width="1.7"/></svg></span>
+                  <strong>Найти фрагменты</strong>
+                  <small>Из длинного видео</small>
                 </button>
               </div>
-              <label class="field">
-                <span>Пожелания <small>необязательно</small></span>
-                <input id="processingRequest" name="processingRequest" maxlength="500" placeholder="Например: без музыки и хука">
-              </label>
-              <button id="openSettings" class="text-button" type="button">Настройки обработки <span aria-hidden="true">↗</span></button>
+              <p id="modeHint" class="mode-hint">Сохраним полную длительность, добавим оформление.</p>
+              <fieldset class="format-picker" aria-describedby="formatHint">
+                <legend>Формат видео</legend>
+                <div class="format-options">
+                  <label class="format-option"><input id="aspect916" type="radio" name="aspectRatio" value="9:16" checked><span class="format-shape portrait" aria-hidden="true"></span><strong>9:16</strong><small>Вертикальный</small></label>
+                  <label class="format-option"><input id="aspect11" type="radio" name="aspectRatio" value="1:1"><span class="format-shape square" aria-hidden="true"></span><strong>1:1</strong><small>Квадратный</small></label>
+                  <label class="format-option"><input id="aspect169" type="radio" name="aspectRatio" value="16:9"><span class="format-shape landscape" aria-hidden="true"></span><strong>16:9</strong><small>Горизонтальный</small></label>
+                </div>
+                <p id="formatHint" class="mode-hint">1080 × 1920 · видео без растягивания</p>
+              </fieldset>
+              <p id="processingSummary" class="creation-guidance" aria-live="polite">Включены субтитры, верхний заголовок и слежение за лицом. Всё можно настроить.</p>
+              <button id="openSettings" class="settings-button" type="button"><span><svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 17h16" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="7" r="3" fill="var(--panel)" stroke="currentColor" stroke-width="1.6"/><circle cx="15" cy="17" r="3" fill="var(--panel)" stroke="currentColor" stroke-width="1.6"/></svg>Настроить оформление</span><span aria-hidden="true">↗</span></button>
+              <details class="creation-note"><summary>Добавить заметку к проекту <span>Необязательно</span></summary><label class="field"><span>Заметка</span><textarea id="processingRequest" name="processingRequest" maxlength="500" rows="2" aria-describedby="creationNoteHelp" placeholder="Например: выпуск про новый сервис"></textarea></label><p id="creationNoteHelp">Сохраним вместе с проектом. Это не команда монтажа: музыку, текст и другие детали можно изменить после просмотра результата.</p></details>
               <label class="consent-row">
                 <input id="projectConsent" type="checkbox" required>
-                <span>Согласен на временное хранение файла для обработки. Удаление через <b id="retentionValue">24 ч</b>.</span>
+                <span>Согласен на хранение файлов для обработки.<br>Они будут удалены через <b id="retentionValue">24 ч</b>.</span>
               </label>
-              <button id="orderSubmit" class="secondary-button retry-button" type="submit" hidden>Продолжить загрузку</button>
+              <div class="create-action"><button id="orderSubmit" class="primary-button start-button" type="submit" disabled>Начать монтаж <span aria-hidden="true">↗</span></button><span class="action-note">Сначала выберите видео и подтвердите согласие</span></div>
               <p class="form-status" id="orderStatus" role="status"></p>
             </form>
           </section>
 
-          <section class="upload-panel" aria-labelledby="uploadTitle">
-            <h2 id="uploadTitle">Загрузить видео</h2>
-            <div id="dropzone" class="dropzone">
-              <input id="fileInput" class="drop-input" type="file" aria-label="Выбрать одно видео из Фото или Файлов" accept="video/*,.mp4,.mov,.mkv">
-              <span class="drop-icon" aria-hidden="true">↑</span>
-              <strong>Выбрать видео</strong>
-              <span>На телефоне откроются «Фото» или «Файлы»</span>
-              <small>Или перетащите сюда · MP4, MOV, MKV · до <b id="limitValue">5 ГБ</b></small>
-            </div>
-            <div class="upload-aux">
-              <div class="extra-pick">
-                <input id="extraFileInput" class="drop-input" type="file" multiple aria-label="Добавить другие файлы" accept=".mp4,.mov,.mkv,.webm,.avi,.mxf,.wav,.mp3,.m4a,.aac,.flac,.ogg,.png,.jpg,.jpeg,.webp,.gif,.zip,.7z,.rar,.txt,.md,.json">
-                <span>Добавить другие файлы</span>
-              </div>
-              <span>При обрыве сети выберите тот же файл ещё раз</span>
-            </div>
-            <span id="chunkValue" hidden></span><span id="storageValue" hidden></span>
-            <button class="token-toggle" id="tokenToggle" type="button" hidden>Ключ доступа</button>
-            <div class="token-box" id="tokenBox" hidden>
-              <label for="tokenInput">Ключ сервера</label>
-              <input id="tokenInput" type="password" autocomplete="off" placeholder="Ключ сервера">
-              <button id="saveToken" type="button">Сохранить</button>
-            </div>
-          </section>
         </div>
       </section>
 
@@ -165,6 +190,7 @@
           <button id="refreshPipeline" class="text-button" type="button">Обновить</button>
         </div>
         <div id="pipelineList" class="pipeline-list" aria-live="polite"></div>
+        <p id="pipelineNotice" class="pipeline-notice" role="status" hidden></p>
       </section>
 
       <details class="files-section" id="filesSection" hidden>
@@ -176,7 +202,7 @@
       </details>
     </section>
 
-    <footer>Файлы хранятся временно и изолированы. Подтверждение ролика никогда не запускает публикацию.</footer>
+    <footer><span>MontageAI <span aria-hidden="true">✳</span> Меньше рутины. Больше творчества.</span><span>Публикация — только с вашего разрешения.</span></footer>
   </main>
 
   <dialog id="authDialog" class="auth-dialog" aria-labelledby="authTitle">
@@ -197,33 +223,38 @@
       <p class="auth-status" id="authStatus" role="status"></p>
       <button class="primary-button auth-submit" id="authSubmit" type="submit">Войти</button>
     </form>
-    <p class="auth-privacy">Пароль передаётся только по защищённому соединению. Сессия хранится в защищённой cookie.</p>
+    <p class="auth-privacy">Ваши ролики видны только вам. Соединение защищено.</p>
   </dialog>
 
   <dialog id="settingsDialog" class="sheet-dialog" aria-labelledby="settingsTitle">
     <div class="dialog-head"><div><span class="eyebrow">По желанию</span><h2 id="settingsTitle">Настройки</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Закрыть">×</button></div>
     <p class="dialog-intro">По умолчанию всё готово. Меняйте только то, что важно для этого ролика.</p>
     <div class="option-list">
-      <label class="option-row"><span><strong>Следить за лицом</strong><small>Умное кадрирование 9:16</small></span><input id="faceTrackingEnabled" type="checkbox" checked></label>
+      <label class="option-row"><span><strong>Следить за лицом</strong><small>Умное кадрирование под выбранный формат</small></span><input id="faceTrackingEnabled" type="checkbox" checked></label>
       <label class="option-row"><span><strong>Субтитры</strong><small>Подсветка активного слова</small></span><input id="subtitlesEnabled" type="checkbox" checked></label>
-      <label class="option-row"><span><strong>AI-hook</strong><small>Интригующий текст сверху</small></span><input id="hookEnabled" type="checkbox" checked></label>
+      <label class="option-row"><span><strong>Верхний заголовок</strong><small>AI-hook по смыслу видео</small></span><input id="hookEnabled" type="checkbox" checked></label>
     </div>
     <details class="optional-fields"><summary>Контакт и другие детали</summary><div><label class="field"><span>Имя</span><input id="customerName" name="customerName" autocomplete="name" maxlength="80" placeholder="Необязательно"></label><label class="field"><span>Контакт для уведомления</span><input id="customerContact" name="contact" maxlength="120" placeholder="@telegram или email"></label><label class="field"><span>Комментарий</span><textarea id="projectComment" name="comment" maxlength="1000" rows="3" placeholder="Стиль, хронометраж или пожелания"></textarea></label></div></details>
     <button class="primary-button dialog-done" type="button" data-close-dialog>Готово</button>
   </dialog>
 
   <dialog id="previewDialog" class="preview-dialog" aria-labelledby="previewTitle">
-    <div class="dialog-head"><div><span class="eyebrow">Предпросмотр</span><h2 id="previewTitle">Готовый ролик</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Закрыть">×</button></div>
-    <video id="previewVideo" controls playsinline preload="metadata"></video>
-  </dialog>
-
-  <dialog id="revisionDialog" class="sheet-dialog" aria-labelledby="revisionTitle">
-    <div class="dialog-head"><div><span class="eyebrow" id="revisionContext">Текущая версия</span><h2 id="revisionTitle">Что изменить?</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Закрыть">×</button></div>
-    <p class="dialog-intro">Опишите правку своими словами — она будет применена только к выбранному ролику.</p>
-    <div class="suggestions"><button type="button" data-suggestion="Сделай музыку тише">Музыку тише</button><button type="button" data-suggestion="Сделай текст ниже">Текст ниже</button><button type="button" data-suggestion="Переделай хук">Переделай хук</button></div>
-    <textarea id="revisionText" maxlength="500" rows="4" placeholder="Например: музыку тише, текст ниже и переделай хук"></textarea>
-    <p id="revisionStatus" class="review-status" role="status"></p>
-    <button id="revisionSubmit" class="primary-button dialog-done" type="button">Отправить правку</button>
+    <div class="dialog-head"><div><span class="eyebrow" id="previewState">Предпросмотр</span><h2 id="previewTitle">Ваш ролик</h2><p id="previewTaskTitle" class="preview-task-title"></p></div><button class="icon-button" type="button" data-close-dialog aria-label="Закрыть просмотр">×</button></div>
+    <div class="review-layout">
+      <div class="review-player"><video id="previewVideo" controls playsinline preload="metadata"></video><button id="previewRefresh" class="secondary-button" type="button" hidden>Доступна новая версия · Обновить видео</button></div>
+      <div class="review-sidebar">
+        <section id="revisionDialog" aria-labelledby="revisionTitle" hidden>
+          <span class="eyebrow" id="revisionContext">Последние штрихи</span><h2 id="revisionTitle">Сделаем по-вашему</h2>
+          <p class="dialog-intro">Напишите, что изменить. Правка коснётся только этого ролика.</p>
+          <div class="suggestions"><button type="button" data-suggestion="Сделай музыку тише">Музыку тише</button><button type="button" data-suggestion="Сделай текст ниже">Текст ниже</button><button type="button" data-suggestion="Переделай хук">Другой заголовок</button></div>
+          <label class="field" for="revisionText">Ваши пожелания</label>
+          <textarea id="revisionText" maxlength="500" rows="4" placeholder="Например: текст чуть ниже и без музыки"></textarea>
+          <p id="revisionStatus" class="review-status" role="status"></p>
+          <button id="revisionSubmit" class="primary-button dialog-done" type="button">Применить правки ↗</button>
+        </section>
+        <div class="review-finish"><a id="previewDownload" class="primary-button" download hidden>Скачать MP4 ↓</a><button id="previewApprove" class="secondary-button" type="button" hidden>Подтвердить финальную версию</button><p>Подтверждение сохраняет финальный файл.<br>Публикация не запускается.</p></div>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="approvalDialog" class="approval-dialog" aria-labelledby="approvalTitle">
@@ -244,6 +275,6 @@
   </template>
 
   <script src="./config.js?v=account-v1"></script>
-  <script type="module" src="./app.js?v=account-v1"></script>
+  <script type="module" src="./app.js?v=studio-20260922-recovery-v1"></script>
 </body>
 </html>

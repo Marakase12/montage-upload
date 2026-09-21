@@ -259,26 +259,22 @@ test('защищает API локальной машины отдельным с
   const denied = await fetch(`http://127.0.0.1:${port}/api/worker/tasks`);
   assert.equal(denied.status, 401);
 
-  const updated = await fetch(`http://127.0.0.1:${port}/api/worker/tasks/task-12345/status`, {
+  const updated = await fetch(`http://127.0.0.1:${port}/api/worker/heartbeat`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-Worker-Secret': 'worker-secret',
     },
     body: JSON.stringify({
-      jobId: 'web-12345678',
-      state: 'PROCESSING',
-      percent: 42,
-      stage: 'analysis',
-      detail: 'GPT анализирует содержание',
+      workerId: 'test-worker01',
+      phase: 'idle',
     }),
   });
   assert.equal(updated.status, 200);
   const payload = await updated.json();
-  assert.equal(payload.status.percent, 42);
-  assert.equal(payload.status.stage, 'analysis');
+  assert.equal(payload.ok, true);
   assert.equal(commands.at(-1).constructor.name, 'PutObjectCommand');
-  assert.equal(commands.at(-1).input.Key, '.status/web-12345678/task-12345.json');
+  assert.equal(commands.at(-1).input.Key, '.workers/test-worker01.json');
 });
 
 test('показывает только запрошенную неудавшуюся задачу для безопасного повтора', async (context) => {
@@ -335,6 +331,9 @@ test('создаёт правку и требует отдельное явно�
         if (command.constructor.name === 'GetObjectCommand') {
           return { Body: { transformToString: async () => JSON.stringify(status) } };
         }
+        if (command.constructor.name === 'HeadObjectCommand') {
+          return { ContentLength: 1024, LastModified: new Date() };
+        }
         if (command.constructor.name === 'ListObjectsV2Command') return { Contents: [] };
         return {};
       },
@@ -368,6 +367,66 @@ test('создаёт правку и требует отдельное явно�
   assert.equal(approvalWithoutConfirmation.status, 400);
 });
 
+test('не создаёт действие для отсутствующего, просроченного или чужого preview', async () => {
+  const commands = [];
+  const jobId = 'web-guard1234';
+  const taskId = 'task-guard1234';
+  let availability = 'MISSING';
+  let resultKey = `.results/${jobId}/${taskId}.mp4`;
+  const app = createApp({
+    env: { TOKEN_SECRET: secret, S3_BUCKET: 'test-bucket', RETENTION_HOURS: '24' },
+    s3: {
+      send: async (command) => {
+        commands.push(command);
+        if (command.constructor.name === 'GetObjectCommand') {
+          return { Body: { transformToString: async () => JSON.stringify({
+            version: 1,
+            jobId,
+            taskId,
+            state: 'READY_FOR_REVIEW',
+            localJobId: '20260922T120000000000Z_guard',
+            resultKey,
+            updatedAt: new Date().toISOString(),
+          }) } };
+        }
+        if (command.constructor.name === 'HeadObjectCommand') {
+          if (availability === 'MISSING') throw Object.assign(new Error('missing'), { name: 'NotFound' });
+          return {
+            ContentLength: 1024,
+            LastModified: new Date(Date.now() - 25 * 60 * 60 * 1000),
+          };
+        }
+        if (command.constructor.name === 'ListObjectsV2Command') return { Contents: [] };
+        return {};
+      },
+    },
+  });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const token = signToken({
+    kind: 'job', jobId, source: 'web', exp: Math.floor(Date.now() / 1000) + 60,
+  }, secret);
+  const request = () => fetch(
+    `http://127.0.0.1:${server.address().port}/api/pipeline/${taskId}/actions`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'REVISION', requestText: 'Сделай музыку тише' }),
+    },
+  );
+
+  try {
+    assert.equal((await request()).status, 409);
+    availability = 'EXPIRED';
+    assert.equal((await request()).status, 410);
+    resultKey = '.results/web-other1234/task-guard1234.mp4';
+    assert.equal((await request()).status, 409);
+    assert.equal(commands.filter((command) => command.constructor.name === 'PutObjectCommand').length, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('даёт отдельную ссылку для скачивания только готового MP4', async (context) => {
   const jobId = 'web-12345678';
   const readyId = 'task-ready01';
@@ -394,6 +453,9 @@ test('даёт отдельную ссылку для скачивания то�
           const status = statuses.find((item) => command.input.Key.endsWith(`/${item.taskId}.json`));
           return { Body: { transformToString: async () => JSON.stringify(status) } };
         }
+        if (command.constructor.name === 'HeadObjectCommand') {
+          return { ContentLength: 1024, LastModified: new Date() };
+        }
         return {};
       },
     },
@@ -415,6 +477,7 @@ test('даёт отдельную ссылку для скачивания то�
   const { tasks } = await response.json();
   for (const taskId of [readyId, approvedId]) {
     const task = tasks.find((item) => item.taskId === taskId);
+    assert.equal(task.resultAvailability, 'AVAILABLE');
     assert.match(task.previewUrl, /^https:\/\/storage\.example\//);
     assert.match(task.downloadUrl, /^https:\/\/storage\.example\//);
     const download = signed.find((item) => item.input.ResponseContentDisposition?.includes(taskId));
