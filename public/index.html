@@ -4,11 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light">
-  <meta name="montage-release" content="studio-20260922-safety-v2">
+  <meta name="montage-release" content="studio-20260922-smart-edit-v1">
   <meta name="description" content="Загрузите видео, следите за обработкой и получите готовый ролик в MontageAI">
   <title>MontageAI — личная видеостудия</title>
   <meta name="theme-color" content="#f6f5f1">
-  <link rel="stylesheet" href="./studio.css?v=studio-20260922-recovery-v1">
+  <link rel="stylesheet" href="./studio.css?v=studio-20260922-smart-edit-v1">
 </head>
 <body class="app-booting">
   <main class="shell">
@@ -151,6 +151,16 @@
                 </button>
               </div>
               <p id="modeHint" class="mode-hint">Сохраним полную длительность, добавим оформление.</p>
+              <div class="smart-edit-card" id="smartEditCard">
+                <label class="smart-edit-toggle" for="smartEditEnabled">
+                  <span class="smart-edit-spark" aria-hidden="true">✳</span>
+                  <span class="smart-edit-heading"><strong>Умный монтаж <span class="ai-tag">AI</span></strong><small id="smartEditState">Включён · решение за вами</small></span>
+                  <input id="smartEditEnabled" type="checkbox" role="switch" checked aria-describedby="smartEditHelp">
+                  <span class="smart-edit-switch" aria-hidden="true"></span>
+                </label>
+                <p id="smartEditHelp">Предложу более сильное начало и уберу затянутые паузы — только после вашего «Применить».</p>
+                <div class="smart-edit-promise"><span aria-hidden="true">↳</span> План появится в чате проекта. Без скрытых сокращений.</div>
+              </div>
               <fieldset class="format-picker" aria-describedby="formatHint">
                 <legend>Формат видео</legend>
                 <div class="format-options">
@@ -275,6 +285,6 @@
   </template>
 
   <script src="./config.js?v=account-v1"></script>
-  <script type="module" src="./app.js?v=studio-20260922-recovery-v1"></script>
+  <script type="module" src="./app.js?v=studio-20260922-smart-edit-v1"></script>
 </body>
 </html>

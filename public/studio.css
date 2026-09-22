@@ -1,3 +1,35 @@
+.smart-edit-card { margin: 20px 0; padding: 18px; border: 1px solid #cddccc; border-radius: 20px; background: linear-gradient(125deg, #eef5e9, #f8faf5 65%, #f5efd9); color: #244c3c; transition: background .2s, border-color .2s; }
+.smart-edit-toggle { display: flex; align-items: center; gap: 12px; min-height: 48px; cursor: pointer; position: relative; }
+.smart-edit-spark { display: grid; place-items: center; flex: 0 0 42px; height: 42px; border-radius: 14px; background: #285e48; color: #eff7d9; font-size: 28px; }
+.smart-edit-heading { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.smart-edit-heading strong { font-size: 16px; letter-spacing: -.025em; }
+.smart-edit-heading small { color: #58745e; font-size: 11px; line-height: 1.5; }
+.ai-tag { display: inline-block; vertical-align: middle; margin-left: 4px; padding: 2px 5px; border-radius: 5px; border: 1px solid #bbcd9f; color: #52653c; font-size: 9px; font-weight: 700; letter-spacing: .07em; }
+.smart-edit-toggle input { position: absolute; right: 0; width: 44px; height: 44px; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
+.smart-edit-switch { width: 42px; height: 26px; border-radius: 20px; background: #abb6ad; padding: 3px; flex: 0 0 42px; box-sizing: border-box; transition: background .2s; }
+.smart-edit-switch::after { content: ''; display: block; width: 20px; height: 20px; background: white; border-radius: 50%; box-shadow: 0 1px 4px #1232; transition: transform .2s; }
+.smart-edit-toggle input:checked:not(:disabled) + .smart-edit-switch { background: #285e48; }
+.smart-edit-toggle input:checked:not(:disabled) + .smart-edit-switch::after { transform: translateX(16px); }
+.smart-edit-toggle input:focus-visible + .smart-edit-switch { outline: 3px solid #6c946d; outline-offset: 4px; }
+.smart-edit-card > p { margin: 13px 0 12px; font-size: 13px; line-height: 1.65; color: #52634f; }
+.smart-edit-promise { display: flex; gap: 7px; padding-top: 11px; border-top: 1px solid #285e481a; font-size: 11px; line-height: 1.55; color: #65755d; }
+.smart-edit-card.is-off { background: #f4f5f1; border-color: #e0e4db; }
+.smart-edit-card.is-off .smart-edit-spark { background: #7c8b7d; }
+.smart-edit-chat { margin-top: 22px; border-top: 1px solid #dfe6dc; padding-top: 20px; }
+.smart-chat-heading { font-size: 12px; font-weight: 700; color: #35624d; margin-bottom: 12px; letter-spacing: .02em; }
+.smart-chat-bubble { padding: 18px; border-radius: 4px 18px 18px 18px; background: #fff; border: 1px solid #dce5d9; }
+.smart-chat-bubble > p { font-size: 14px; line-height: 1.65; margin: 0 0 12px; }
+.smart-chat-bubble ul { list-style: none; display: grid; gap: 15px; padding: 0; margin: 17px 0; }
+.smart-chat-bubble li { display: grid; gap: 5px; border-left: 2px solid #90ac83; padding-left: 12px; }
+.smart-chat-bubble li strong { font-size: 14px; }
+.smart-chat-bubble li span { color: #617063; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.smart-chat-bubble .smart-duration { display: inline-block; background: #eef3e9; border-radius: 8px; padding: 6px 10px; font-size: 12px; color: #385f41; }
+.smart-chat-bubble .smart-consent { font-size: 12px; color: #71806e; }
+.smart-apply { min-height: 44px; padding: 12px 18px; }
+.smart-apply:disabled { cursor: default; opacity: .5; }
+@media (max-width: 480px) { .smart-edit-card { padding: 14px; } .smart-edit-spark { flex-basis: 34px; height: 36px; font-size: 23px; } .smart-edit-toggle { gap: 9px; } .smart-chat-bubble { padding: 14px; } .smart-apply { width: 100%; } }
+@media (prefers-reduced-motion: reduce) { .smart-edit-card, .smart-edit-switch, .smart-edit-switch::after { transition: none; } }
+
 :root {
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #202c29;

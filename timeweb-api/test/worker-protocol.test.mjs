@@ -112,11 +112,12 @@ test('finishing an already claimed action does not require bridgeVersion', async
   assert.equal(completed.body.action.state, 'FAILED');
 });
 
-test('health advertises safety release and minimum owner-aware bridge protocol', async (context) => {
+test('health advertises smart-edit release and minimum owner-aware bridge protocol', async (context) => {
   const f = await fixture(context);
   const health = await f.request('/api/health');
   assert.equal(health.status, 200);
-  assert.equal(health.body.release, 'studio-20260922-safety-v2');
+  assert.equal(health.body.release, 'studio-20260922-smart-edit-v1');
+  assert.equal(health.body.smartEditProposalsVersion, 1);
   assert.equal(health.body.minimumBridgeVersion, 3);
   assert.equal(health.body.ownerIsolationVersion, 1);
 });

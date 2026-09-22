@@ -17,6 +17,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import express from 'express';
+import { normalizeSmartProposal, confirmedSmartEditAction, requireSmartBridge } from './smart-edit.js';
 import {
   AccountError,
   AccountRateLimitError,
@@ -182,12 +183,16 @@ function processingOptions(value = {}) {
   if (!OUTPUT_ASPECT_RATIOS.has(aspectRatio)) {
     throw new HttpError(400, 'Выберите формат видео: 9:16, 1:1 или 16:9');
   }
+  if (Object.hasOwn(input, 'smartEditEnabled') && typeof input.smartEditEnabled !== 'boolean') {
+    throw new HttpError(400, 'Некорректная настройка умного монтажа');
+  }
   return {
     mode: input.mode === 'long' ? 'long' : 'short',
     aspectRatio,
     faceTrackingEnabled: input.faceTrackingEnabled !== false,
     subtitlesEnabled: input.subtitlesEnabled !== false,
     hookEnabled: input.hookEnabled !== false,
+    smartEditEnabled: input.mode !== 'long' && input.smartEditEnabled === true,
     musicEnabled: input.musicEnabled !== false,
     requestText: shortText(input.requestText, 500),
   };
@@ -941,8 +946,9 @@ export function createApp(options = {}) {
     response.status(ready ? 200 : 503).json({
       ok: ready,
       cloud: true,
-      release: 'studio-20260922-safety-v2',
+      release: 'studio-20260922-smart-edit-v1',
       minimumBridgeVersion: MINIMUM_BRIDGE_VERSION,
+      smartEditProposalsVersion: 1,
       ownerIsolationVersion: 1,
       recoveryAvailable: Boolean(accountStore?.pool) || env.NODE_ENV !== 'production',
       provider: 'timeweb-s3',
@@ -1251,6 +1257,7 @@ export function createApp(options = {}) {
     assertPipelineOwnerAccess(ownerFromJobAccess(job), owner, job.jobId);
     const kind = String(request.body?.kind ?? '').toUpperCase();
     if (!['REVISION', 'APPROVE'].includes(kind)) throw new HttpError(400, 'Неизвестное действие');
+    const smartAction = confirmedSmartEditAction(status, { ...request.body, kind });
     if (kind === 'REVISION' && !['READY_FOR_REVIEW', 'APPROVED'].includes(status.state)) {
       throw new HttpError(409, 'Ролик пока не готов к правкам');
     }
@@ -1283,7 +1290,8 @@ export function createApp(options = {}) {
         throw new HttpError(409, 'Предыдущее действие ещё выполняется');
       }
     }
-    const requestText = shortText(request.body?.requestText, 500);
+    const requestText = smartAction.smartEditProposalId
+      ? 'Применить показанный план умного монтажа' : shortText(request.body?.requestText, 500);
     if (kind === 'REVISION' && requestText.length < 2) {
       throw new HttpError(400, 'Опиши, что изменить в ролике');
     }
@@ -1299,6 +1307,7 @@ export function createApp(options = {}) {
       resultAttemptId: status.resultAttemptId || null,
       kind,
       previousState: status.state,
+      ...smartAction,
       requestText: kind === 'APPROVE' ? 'Всё хорошо, подтверждаю этот preview' : requestText,
       state: 'PENDING',
       createdAt: new Date().toISOString(),
@@ -1357,6 +1366,7 @@ export function createApp(options = {}) {
     const actionId = safeIdentifier(request.params.actionId, 'actionId');
     const jobId = safeIdentifier(request.body?.jobId, 'jobId');
     const pending = await objectJson(s3, bucket, actionKey(jobId, actionId));
+    requireSmartBridge(request.body?.bridgeVersion, Boolean(pending.smartEditProposalId));
     const workerId = safeIdentifier(request.body?.workerId, 'workerId');
     const action = await pipelineRuntime.withTask(jobId, pending.taskId, async () => {
       const current = await pipelineRuntime.read(actionKey(jobId, actionId));
@@ -1415,6 +1425,8 @@ export function createApp(options = {}) {
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const taskId = safeIdentifier(request.params.taskId, 'taskId');
     const jobId = safeIdentifier(request.body?.jobId, 'jobId');
+    const queued = await pipelineRuntime.task(jobId, taskId);
+    requireSmartBridge(request.body?.bridgeVersion, queued.processing?.smartEditEnabled === true);
     const claimed = await pipelineRuntime.claim(jobId, taskId, request.body?.workerId);
     const { task } = claimed;
     const downloadUrl = await signUrl(
@@ -1454,6 +1466,9 @@ export function createApp(options = {}) {
         score: Number(candidate?.score) || null,
         reason: shortText(candidate?.selection_reason || candidate?.reason, 300),
       }));
+    }
+    if (Object.hasOwn(request.body ?? {}, 'smartEditProposal')) {
+      status.smartEditProposal = normalizeSmartProposal(request.body.smartEditProposal);
     }
     const updated = await pipelineRuntime.update(jobId, taskId, request.body ?? {}, status);
     response.json({ ok: true, status: updated });

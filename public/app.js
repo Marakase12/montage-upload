@@ -1,4 +1,4 @@
-import { freshProcessingOptions, sourceProblem, canStartCreation, projectMatches, previewIdentity } from './studio-state.js';
+import { freshProcessingOptions, sourceProblem, canStartCreation, projectMatches, previewIdentity, canApplySmartEdit } from './studio-state.js?v=studio-20260922-smart-edit-v1';
 
 const dropzone = document.querySelector('#dropzone');
 const fileInput = document.querySelector('#fileInput');
@@ -38,6 +38,8 @@ const processingRequest = document.querySelector('#processingRequest');
 const faceTrackingEnabled = document.querySelector('#faceTrackingEnabled');
 const subtitlesEnabled = document.querySelector('#subtitlesEnabled');
 const hookEnabled = document.querySelector('#hookEnabled');
+const smartEditEnabled = document.querySelector('#smartEditEnabled');
+const smartPending = new Set();
 const selectedSource = document.querySelector('#selectedSource');
 const selectedSourceVideo = document.querySelector('#selectedSourceVideo');
 const selectedSourceName = document.querySelector('#selectedSourceName');
@@ -391,6 +393,7 @@ function resetProjectSurface() {
 }
 
 function updateModeHint() {
+  updateSmartEditCard();
   if (modeHint) modeHint.textContent = processingMode.value === 'long'
     ? 'Найдём сильные моменты и объясним выбор. На этом этапе короткие ролики автоматически не создаются.'
     : 'Оформим видео целиком. Начало и конец сохранятся, если вы не попросите иначе.';
@@ -404,6 +407,7 @@ function resetProcessingOptions() {
   faceTrackingEnabled.checked = defaults.faceTrackingEnabled;
   subtitlesEnabled.checked = defaults.subtitlesEnabled;
   hookEnabled.checked = defaults.hookEnabled;
+  smartEditEnabled.checked = defaults.smartEditEnabled;
   projectComment.value = '';
   projectConsent.checked = false;
   document.querySelectorAll('.mode-option').forEach((option) => {
@@ -418,6 +422,77 @@ function resetProcessingOptions() {
 
 function selectedAspectRatio() {
   return aspectInputs.find((input) => input.checked)?.value || '9:16';
+}
+
+function updateSmartEditCard() {
+  const isLong = processingMode.value === 'long';
+  smartEditEnabled.disabled = isLong;
+  document.querySelector('#smartEditCard').classList.toggle('is-off', isLong || !smartEditEnabled.checked);
+  document.querySelector('#smartEditState').textContent = isLong ? 'Для режима «Оформить целиком»'
+    : smartEditEnabled.checked ? 'Включён · решение за вами' : 'Выключен · без дополнительных предложений';
+  document.querySelector('#smartEditHelp').textContent = isLong
+    ? 'В LONG сначала предложим сильные фрагменты. Умный монтаж целого ролика доступен в соседнем режиме.'
+    : smartEditEnabled.checked ? 'Предложу более сильное начало и уберу затянутые паузы — только после вашего «Применить».'
+      : 'Оформим видео целиком, без дополнительных предложений по сокращению. Режим можно включить перед загрузкой.';
+  document.querySelector('.smart-edit-promise').textContent = isLong ? 'Для LONG подбор моментов работает отдельно.'
+    : smartEditEnabled.checked ? '↳ План появится в чате проекта. Без скрытых сокращений.' : '↳ Полная длительность исходника сохраняется.';
+}
+smartEditEnabled.addEventListener('change', updateSmartEditCard);
+
+function appendSmartEditChat(card, task) {
+  const plan = task.smartEditProposal;
+  if (!plan) return;
+  const chat = document.createElement('section');
+  chat.className = 'smart-edit-chat';
+  chat.setAttribute('aria-label', 'Чат с монтажным ассистентом');
+  const header = document.createElement('div');
+  header.className = 'smart-chat-heading';
+  header.textContent = '✳  Монтажный ассистент';
+  const bubble = document.createElement('div');
+  bubble.className = 'smart-chat-bubble';
+  const message = document.createElement('p');
+  message.textContent = plan.state === 'APPLIED' ? 'Готово. Применил подтверждённый вами план. Новый результат доступен в этом проекте.' : plan.message;
+  bubble.append(message);
+  const changes = document.createElement('ul');
+  for (const change of plan.changes || []) {
+    const item = document.createElement('li');
+    const title = document.createElement('strong');
+    title.textContent = change.title;
+    const reason = document.createElement('span');
+    reason.textContent = change.reason;
+    item.append(title, reason);
+    changes.append(item);
+  }
+  if (changes.children.length) bubble.append(changes);
+  if (Number.isFinite(plan.beforeSeconds) && Number.isFinite(plan.afterSeconds)) {
+    const duration = document.createElement('p');
+    duration.className = 'smart-duration';
+    duration.textContent = `${plan.state === 'APPLIED' ? 'Длительность' : 'По плану'}: ${plan.beforeSeconds.toFixed(1)} → ${plan.afterSeconds.toFixed(1)} сек.`;
+    bubble.append(duration);
+  }
+  if (plan.state === 'PROPOSED') {
+    const consent = document.createElement('p');
+    consent.className = 'smart-consent';
+    consent.textContent = 'Нажатие «Применить план» разрешает только перечисленные правки. Это не публикация.';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'primary-button smart-apply';
+    button.textContent = 'Применить план';
+    button.disabled = !canApplySmartEdit(task) || smartPending.has(plan.id);
+    const feedback = document.createElement('p');
+    feedback.className = 'review-status';
+    feedback.setAttribute('role', 'status');
+    button.addEventListener('click', async () => {
+      if (smartPending.has(plan.id) || !canApplySmartEdit(task)) return;
+      smartPending.add(plan.id);
+      try {
+        await sendPipelineAction(task, { kind: 'REVISION', smartEditProposalId: plan.id, confirmation: 'APPLY_SMART_EDIT' }, feedback, [button]);
+      } finally { smartPending.delete(plan.id); }
+    });
+    bubble.append(consent, button, feedback);
+  }
+  chat.append(header, bubble);
+  card.append(chat);
 }
 
 function updateProcessingSummary() {
@@ -1429,6 +1504,7 @@ async function loadPipeline() {
         });
         card.append(candidates);
       }
+      appendSmartEditChat(card, task);
       if (task.previewUrl || task.downloadUrl) {
         const links = document.createElement('div');
         links.className = 'result-links';
@@ -1806,6 +1882,10 @@ async function createProject() {
   orderStatus.textContent = 'Создаём защищённый проект…';
   try {
     const accountProject = Boolean(currentUser && authEnabled && accountIsSameOrigin);
+    if (processingMode.value !== 'long' && smartEditEnabled.checked) {
+      const capability = await api('/api/health', { timeoutMs: 8000 });
+      if (capability.smartEditProposalsVersion !== 1) throw new Error('Умный монтаж ещё не подключён на сервере. Попробуйте позже или выключите эту опцию для обычного монтажа.');
+    }
     const result = await api(accountProject ? '/api/projects' : '/api/jobs', {
       method: 'POST',
       timeoutMs: 15000,
@@ -1824,6 +1904,7 @@ async function createProject() {
           faceTrackingEnabled: faceTrackingEnabled.checked,
           subtitlesEnabled: subtitlesEnabled.checked,
           hookEnabled: hookEnabled.checked,
+          smartEditEnabled: processingMode.value !== 'long' && smartEditEnabled.checked,
           requestText: processingRequest.value,
         },
       }),

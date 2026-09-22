@@ -13,6 +13,44 @@ const SECRET = 'synthetic-owner-tests-not-a-real-key';
 const USER_A = '11111111-1111-4111-8111-111111111111';
 const USER_B = '22222222-2222-4222-8222-222222222222';
 
+test('smart proposal survives queue and requires explicit scoped one-time acceptance', async context => {
+  const api = await fixture(context);
+  const created = await api.create(null, { processing: { smartEditEnabled: true } });
+  const { task, auth } = await api.upload(created.token);
+  assert.equal(task.processing.smartEditEnabled, true);
+  api.ready(task);
+  const key = `.status/${task.jobId}/${task.taskId}.json`;
+  const suggestion = { version: 1, id: 'a'.repeat(64), state: 'PROPOSED', requiresConfirmation: true,
+    message: 'Предлагаю убрать паузы', beforeSeconds: 30, afterSeconds: 28,
+    changes: [{ intent: 'REMOVE_ALL_PAUSES', value: '', title: 'Убрать паузы', reason: 'Плотнее темп' }] };
+  api.objects.get(key).smartEditProposal = suggestion;
+  const endpoint = `/api/pipeline/${task.taskId}/actions`;
+  const body = { kind: 'REVISION', smartEditProposalId: suggestion.id, confirmation: 'APPLY_SMART_EDIT' };
+  const before = structuredClone([...api.objects]);
+  for (const patch of [{ confirmation: undefined }, { smartEditProposalId: 'b'.repeat(64) }, { kind: 'APPROVE' }]) {
+    const denied = await api.request(endpoint, { ...body, ...patch }, auth);
+    assert.ok([400, 409].includes(denied.status));
+    assert.deepEqual([...api.objects], before);
+  }
+  const accepted = await api.request(endpoint, { ...body, actions: [{ intent: 'PUBLISH' }] }, auth);
+  assert.equal(accepted.status, 202);
+  const { action } = await accepted.json();
+  assert.equal(action.smartEditProposalId, suggestion.id);
+  assert.equal(action.confirmation, 'APPLY_SMART_EDIT');
+  assert.equal(action.kind, 'REVISION');
+  assert.equal(action.actions, undefined);
+  assert.deepEqual(action.owner, task.owner);
+  assert.equal((await api.request(endpoint, body, auth)).status, 409);
+  assert.equal([...api.objects.keys()].filter(key => key.startsWith('.actions/')).length, 1);
+  const claimPath = `/api/worker/actions/${action.actionId}/claim`;
+  const workerAuth = { 'X-Worker-Secret': 'owner-test-worker' };
+  assert.equal((await api.request(claimPath, { jobId: task.jobId, workerId: 'worker-smart01', bridgeVersion: 3 }, workerAuth)).status, 426);
+  assert.equal(api.objects.get(key).state, 'READY_FOR_REVIEW');
+  const claimed = await api.request(claimPath, { jobId: task.jobId, workerId: 'worker-smart01', bridgeVersion: 4 }, workerAuth);
+  assert.equal(claimed.status, 200);
+  assert.equal((await claimed.json()).action.smartEditProposalId, suggestion.id);
+});
+
 test('owner identity is account UUID or exact guest project, never a client username', () => {
   assert.deepEqual(ownerFromJobAccess({ jobId: 'web-project01', source: 'account', userId: USER_A,
     owner: { kind: 'account', id: USER_B } }), { kind: 'account', id: USER_A });

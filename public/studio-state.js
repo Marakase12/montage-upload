@@ -1,6 +1,13 @@
 // Small, dependency-free rules shared by the interface and its regression tests.
 export function freshProcessingOptions() {
-  return { mode: 'short', aspectRatio: '9:16', requestText: '', faceTrackingEnabled: true, subtitlesEnabled: true, hookEnabled: true };
+  return { mode: 'short', aspectRatio: '9:16', requestText: '', faceTrackingEnabled: true, subtitlesEnabled: true, hookEnabled: true, smartEditEnabled: true };
+}
+
+export function canApplySmartEdit(task) {
+  return task.smartEditProposal?.state === 'PROPOSED'
+    && ['READY_FOR_REVIEW', 'APPROVED'].includes(task.state)
+    && task.resultAvailability === 'AVAILABLE'
+    && !['PENDING', 'PROCESSING'].includes(task.action?.state);
 }
 
 export function sourceProblem(file, maxFileSize) {
