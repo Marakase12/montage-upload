@@ -72,16 +72,40 @@ try {
     headers: sessionHeaders,
   });
   assert.ok(part.uploadUrl);
+  const storagePreflight = await fetch(part.uploadUrl, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: origin,
+      'Access-Control-Request-Method': 'PUT',
+      'Access-Control-Request-Headers': 'content-type',
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  assert.ok([200, 204].includes(storagePreflight.status),
+    `S3 preflight: HTTP ${storagePreflight.status}`);
+  assert.equal(storagePreflight.headers.get('access-control-allow-origin'), origin,
+    'S3 preflight origin is not allowed');
+  const allowedMethods = String(storagePreflight.headers.get('access-control-allow-methods') || '')
+    .split(',').map((value) => value.trim().toUpperCase());
+  assert.ok(allowedMethods.includes('PUT'), 'S3 preflight does not allow PUT');
+  const allowedHeaders = String(storagePreflight.headers.get('access-control-allow-headers') || '')
+    .split(',').map((value) => value.trim().toLowerCase());
+  assert.ok(allowedHeaders.includes('*') || allowedHeaders.includes('content-type'),
+    'S3 preflight does not allow Content-Type');
   const uploaded = await fetch(part.uploadUrl, {
     method: 'PUT',
-    headers: { Origin: origin },
+    headers: { Origin: origin, 'Content-Type': 'application/octet-stream' },
     body: bytes,
     signal: AbortSignal.timeout(20_000),
   });
   assert.equal(uploaded.status, 200, `S3 upload: HTTP ${uploaded.status}`);
   assert.equal(uploaded.headers.get('access-control-allow-origin'), origin,
     'S3 CORS failed');
-  console.log('5/6 Direct S3 upload and CORS: OK');
+  const exposedHeaders = String(uploaded.headers.get('access-control-expose-headers') || '')
+    .split(',').map((value) => value.trim().toLowerCase());
+  assert.ok(exposedHeaders.includes('*') || exposedHeaders.includes('etag'),
+    'S3 does not expose ETag to the browser');
+  console.log('5/6 Direct S3 preflight, upload and CORS: OK');
 
   const completed = await json(`/api/uploads/${session.uploadId}/complete`, {
     method: 'POST',

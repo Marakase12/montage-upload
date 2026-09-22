@@ -128,9 +128,59 @@ Account responses не кешируются. Чужой `projectId` возвра
 использует совместимый `/api/jobs`, поэтому поля формы личного кабинета не
 теряются перед передачей локальному worker.
 
-Публичный сайт размещён на GitHub Pages; `public/config.js` указывает технический домен API. Express также может отдать страницу со своего домена для диагностики. В настройках CORS бакета разрешите origin `https://marakase12.github.io`, методы `GET`, `PUT`, `HEAD`, заголовки `*` и expose-заголовок `ETag`.
+Личный кабинет и сайт работают на домене Express/API; GitHub Pages остаётся
+гостевым входом. Обе страницы загружают части файла напрямую в S3, поэтому
+разрешение origin в API не заменяет разрешение того же origin в CORS бакета.
+API автоматически допускает свой домен; S3 требует его явного перечисления.
 
-После смены домена API проверьте его извне командой `npm run smoke:cloud -- https://<домен-api>` из корня репозитория. Проверка создаёт отдельную заявку и загружает маленький синтетический текстовый файл; личные медиа не используются. Зелёный healthcheck в App Platform проверяет только локальный процесс и не заменяет этот тест.
+`ALLOWED_ORIGIN` и `ACCOUNT_ALLOWED_ORIGIN` поддерживают несколько origin через
+запятую. Для текущего сайта, с сохранением прежнего разрешённого домена:
+
+```text
+ALLOWED_ORIGIN=https://marakase12.github.io
+ACCOUNT_ALLOWED_ORIGIN=https://marakase12-montage-upload-1827.twc1.net,https://marakase12-montage-upload-7b8d.twc1.net
+```
+
+Настройки CORS бакета должны совпадать:
+
+```json
+{
+  "CORSRules": [{
+    "AllowedOrigins": [
+      "https://marakase12.github.io",
+      "https://marakase12-montage-upload-1827.twc1.net",
+      "https://marakase12-montage-upload-7b8d.twc1.net"
+    ],
+    "AllowedMethods": ["GET", "PUT", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }]
+}
+```
+
+Origin указывается без пути и завершающего `/`. `OPTIONS` не добавляется в
+AllowedMethods: S3 сам обслуживает preflight для разрешённого `PUT`.
+`Authorization` и `X-Upload-Session` используются только в запросах к API;
+загрузка в S3 авторизована подписанной ссылкой. См. [инструкцию Timeweb по CORS](https://timeweb.cloud/docs/s3-storage/supported-features/cors-setup).
+
+При старте API синхронизирует CORS из этих переменных. Изменение только в панели
+бакета может быть перезаписано при следующем запуске. Если старое приложение
+использует тот же бакет, его конфигурация также должна содержать полный список
+origin: иначе его перезапуск вернёт старые правила. Не удаляйте действующие origin
+без проверки, какие сайты ещё используют бакет.
+
+После смены домена API проверьте **каждый** origin из корня репозитория:
+
+```powershell
+npm run smoke:cloud -- https://marakase12-montage-upload-1827.twc1.net https://marakase12.github.io
+npm run smoke:cloud -- https://marakase12-montage-upload-1827.twc1.net https://marakase12-montage-upload-1827.twc1.net
+```
+
+Проверка создаёт отдельную заявку и маленький синтетический текстовый файл;
+личные медиа не используются. Она проверяет API, S3 OPTIONS с `Content-Type`,
+прямой PUT, CORS и доступность `ETag`, завершение multipart и список файлов.
+Зелёный healthcheck в App Platform проверяет только процесс и не заменяет этот тест.
 
 Сервер каждый час удаляет объекты и незавершённые multipart-загрузки старше `RETENTION_HOURS`. Ручной запуск: `POST /api/admin/cleanup`.
 
