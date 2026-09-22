@@ -188,7 +188,13 @@ test('HTTP retry is project-token scoped and pipeline never leaks lease credenti
   const origin = `http://127.0.0.1:${server.address().port}`;
   const token = (id) => signToken({ kind: 'job', jobId: id, exp: Math.floor(Date.now() / 1000) + 600 }, secret);
   const call = (path, id = jobId, method = 'POST') => fetch(`${origin}${path}`, { method, headers: { Authorization: `Bearer ${token(id)}` } });
+  const beforeForeignRetry = structuredClone([...f.objects]);
+  const writesBeforeForeignRetry = f.writes.length;
+  // Missing or foreign queue ownership has one generic refusal. Do not
+  // disclose the task's actual state or mutate either namespace.
   assert.equal((await call(`/api/pipeline/${taskId}/retry`, 'web-foreign01')).status, 409);
+  assert.equal(f.writes.length, writesBeforeForeignRetry);
+  assert.deepEqual([...f.objects], beforeForeignRetry);
   const accepted = await call(`/api/pipeline/${taskId}/retry`);
   assert.equal(accepted.status, 200);
   assert.equal((await accepted.json()).status.state, 'QUEUED');
@@ -221,7 +227,7 @@ test('APPROVE preserves the exact previous result; REVISION writes a fenced new 
   const approved = await request(`/api/pipeline/${taskId}/actions`, { kind: 'APPROVE', confirmation: 'APPROVE' });
   assert.equal(approved.status, 202);
   const approveId = approved.body.action.actionId;
-  assert.equal((await request(`/api/worker/actions/${approveId}/claim`, { jobId, workerId }, true)).status, 200);
+  assert.equal((await request(`/api/worker/actions/${approveId}/claim`, { jobId, workerId, bridgeVersion: 3 }, true)).status, 200);
   assert.equal(f.getStatus().state, 'PROCESSING');
   const approveFields = { jobId, workerId, actionId: approveId };
   assert.equal((await request(`/api/worker/tasks/${taskId}/result-upload`, approveFields, true)).status, 409);
@@ -236,11 +242,11 @@ test('APPROVE preserves the exact previous result; REVISION writes a fenced new 
   const revision = await request(`/api/pipeline/${taskId}/actions`, { kind: 'REVISION', requestText: 'Убери хук' });
   assert.equal(revision.status, 202);
   const actionId = revision.body.action.actionId;
-  assert.equal((await request(`/api/worker/actions/${actionId}/claim`, { jobId, workerId }, true)).status, 200);
+  assert.equal((await request(`/api/worker/actions/${actionId}/claim`, { jobId, workerId, bridgeVersion: 3 }, true)).status, 200);
   f.advance(3 * 3_600_000);
   const pending = await request('/api/worker/actions', undefined, true);
   assert.equal(pending.body.actions.some((action) => action.actionId === actionId), false);
-  assert.equal((await request(`/api/worker/actions/${actionId}/claim`, { jobId, workerId: otherWorker }, true)).status, 409);
+  assert.equal((await request(`/api/worker/actions/${actionId}/claim`, { jobId, workerId: otherWorker, bridgeVersion: 3 }, true)).status, 409);
   const actionFields = { jobId, workerId, actionId };
   const upload = await request(`/api/worker/tasks/${taskId}/result-upload`, actionFields, true);
   assert.equal(upload.status, 200);

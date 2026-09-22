@@ -78,7 +78,7 @@ async function assertUploadRoundTrip(api, token, expectedRatio) {
   assert.equal(workerList.status, 200);
   const listedTask = (await workerList.json()).tasks.find((item) => item.taskId === upload.uploadId);
   assert.equal(listedTask.processing.aspectRatio, expectedRatio);
-  const claim = await api.request(`/api/worker/tasks/${upload.uploadId}/claim`, { jobId: job.jobId, workerId: 'test-worker01' }, {
+  const claim = await api.request(`/api/worker/tasks/${upload.uploadId}/claim`, { jobId: job.jobId, workerId: 'test-worker01', bridgeVersion: 3 }, {
     'X-Worker-Secret': 'test-worker',
   });
   assert.equal(claim.status, 200);

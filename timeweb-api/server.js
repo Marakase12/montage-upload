@@ -6,11 +6,9 @@ import {
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
-  DeleteObjectsCommand,
   GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
-  ListMultipartUploadsCommand,
   ListPartsCommand,
   PutObjectCommand,
   PutBucketCorsCommand,
@@ -34,6 +32,14 @@ import {
 import { validateAccountEnvironment } from './postgres.js';
 import { checkResultAvailability, createProjectStatusReader } from './project-status.js';
 import { PipelineError, createPipelineRuntime, createTaskLock, publicPipelineStatus } from './pipeline-runtime.js';
+import { StorageCleanupReportError, reportStorageRetention } from './storage-cleanup.js';
+import {
+  PipelineOwnerError,
+  assertPipelineOwnerAccess,
+  normalizePipelineOwner,
+  ownerFromJobAccess,
+  ownerFromTask,
+} from './pipeline-owner.js';
 
 const DEFAULT_MAX_FILE_SIZE = 1024 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE = 10 * 1024 * 1024;
@@ -49,6 +55,7 @@ const DEFAULT_ACCOUNT_PROJECT_LIMIT = 20;
 const DEFAULT_ACCOUNT_PROJECT_WINDOW_SECONDS = 60 * 60;
 const DEFAULT_ACCOUNT_PROJECT_QUOTA = 200;
 const DEFAULT_RATE_LIMIT_RETENTION_HOURS = 7 * 24;
+const MINIMUM_BRIDGE_VERSION = 3;
 const PROCESSABLE_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv']);
 const OUTPUT_ASPECT_RATIOS = new Set(['9:16', '1:1', '16:9']);
 export function isProcessableVideoFile(name) {
@@ -68,9 +75,10 @@ const ALLOWED_EXTENSIONS = new Set([
 ]);
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, code) {
     super(message);
     this.status = status;
+    if (code) this.code = code;
   }
 }
 
@@ -199,6 +207,14 @@ function requireWorker(request, env) {
   if (!workerAuthorized(request, env)) throw new HttpError(401, 'Доступ локальной машины запрещён');
 }
 
+// Compatibility gate for new claims, not an authentication substitute.
+function requireBridgeVersion(request) {
+  const version = request.body?.bridgeVersion;
+  if (!Number.isInteger(version) || version < MINIMUM_BRIDGE_VERSION) {
+    throw new HttpError(426, 'Обновите MontageAI Cloud Bridge до версии 3 или новее для получения новых задач', 'WORKER_UPGRADE_REQUIRED');
+  }
+}
+
 function safeIdentifier(value, label) {
   const result = String(value ?? '');
   if (!/^[A-Za-z0-9_-]{8,100}$/.test(result)) throw new HttpError(400, `Некорректный ${label}`);
@@ -309,56 +325,6 @@ async function listAllParts(s3, bucket, key, uploadId) {
     marker = page.IsTruncated ? page.NextPartNumberMarker : undefined;
   } while (marker);
   return parts.sort((a, b) => a.PartNumber - b.PartNumber);
-}
-
-async function cleanupExpiredObjects(s3, bucket, retentionHours) {
-  const cutoff = Date.now() - retentionHours * 60 * 60 * 1000;
-  let continuationToken;
-  let deleted = 0;
-
-  do {
-    const page = await s3.send(new ListObjectsV2Command({
-      Bucket: bucket,
-      ContinuationToken: continuationToken,
-      MaxKeys: 1000,
-    }));
-    const expired = (page.Contents ?? [])
-      .filter((object) => object.Key && object.LastModified?.getTime() < cutoff)
-      .map((object) => ({ Key: object.Key }));
-    if (expired.length) {
-      await s3.send(new DeleteObjectsCommand({
-        Bucket: bucket,
-        Delete: { Objects: expired, Quiet: true },
-      }));
-      deleted += expired.length;
-    }
-    continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
-  } while (continuationToken);
-
-  let keyMarker;
-  let uploadIdMarker;
-  let aborted = 0;
-  do {
-    const page = await s3.send(new ListMultipartUploadsCommand({
-      Bucket: bucket,
-      KeyMarker: keyMarker,
-      UploadIdMarker: uploadIdMarker,
-      MaxUploads: 1000,
-    }));
-    const stale = (page.Uploads ?? []).filter(
-      (upload) => upload.Key && upload.UploadId && upload.Initiated?.getTime() < cutoff,
-    );
-    await Promise.all(stale.map((upload) => s3.send(new AbortMultipartUploadCommand({
-      Bucket: bucket,
-      Key: upload.Key,
-      UploadId: upload.UploadId,
-    }))));
-    aborted += stale.length;
-    keyMarker = page.IsTruncated ? page.NextKeyMarker : undefined;
-    uploadIdMarker = page.IsTruncated ? page.NextUploadIdMarker : undefined;
-  } while (keyMarker || uploadIdMarker);
-
-  return { deleted, aborted };
 }
 
 function formatBytes(value) {
@@ -607,18 +573,37 @@ export function createApp(options = {}) {
     next();
   });
 
-  const jobFromRequest = (request) => verifyToken(bearer(request), env.TOKEN_SECRET, 'job');
+  const jobFromRequest = async (request) => {
+    const job = verifyToken(bearer(request), env.TOKEN_SECRET, 'job');
+    const requestOwner = ownerFromJobAccess(job);
+    if (typeof accountStore?.findProjectByJobId === 'function') {
+      const project = await accountStore.findProjectByJobId(job.jobId);
+      if (project && (requestOwner.kind !== 'account' || requestOwner.id !== project.userId)) {
+        throw new PipelineOwnerError();
+      }
+      if (!project && requestOwner.kind === 'account') throw new PipelineOwnerError();
+    } else if (requestOwner.kind === 'account') {
+      throw new PipelineOwnerError();
+    }
+    return job;
+  };
   const sessionFromRequest = (request) => verifyToken(
     request.headers['x-upload-session'] ?? '',
     env.TOKEN_SECRET,
     'session',
   );
-  const assertSession = (request) => {
-    const job = jobFromRequest(request);
+  const assertSession = async (request) => {
+    const job = await jobFromRequest(request);
     const session = sessionFromRequest(request);
     if (session.jobId !== job.jobId || session.sessionId !== request.params.uploadId) {
       throw new HttpError(403, 'Сессия не принадлежит этой ссылке');
     }
+    // Validate before signing part URLs, completing or aborting storage work.
+    const sessionOwner = normalizePipelineOwner(
+      session.owner === undefined ? ownerFromJobAccess(job) : session.owner,
+      job.jobId,
+    );
+    assertPipelineOwnerAccess(ownerFromJobAccess(job), sessionOwner, job.jobId);
     return { job, session };
   };
 
@@ -956,7 +941,9 @@ export function createApp(options = {}) {
     response.status(ready ? 200 : 503).json({
       ok: ready,
       cloud: true,
-      release: 'studio-20260922-recovery-v1',
+      release: 'studio-20260922-safety-v2',
+      minimumBridgeVersion: MINIMUM_BRIDGE_VERSION,
+      ownerIsolationVersion: 1,
       recoveryAvailable: Boolean(accountStore?.pool) || env.NODE_ENV !== 'production',
       provider: 'timeweb-s3',
       protected: true,
@@ -972,8 +959,8 @@ export function createApp(options = {}) {
     });
   }));
 
-  app.get('/api/session', (request, response) => {
-    const job = jobFromRequest(request);
+  app.get('/api/session', asyncRoute(async (request, response) => {
+    const job = await jobFromRequest(request);
     response.json({
       ok: true,
       jobId: job.jobId,
@@ -981,10 +968,11 @@ export function createApp(options = {}) {
       processing: processingOptions(job.processing),
       expiresAt: new Date(job.exp * 1000).toISOString(),
     });
-  });
+  }));
 
   app.post('/api/uploads', asyncRoute(async (request, response) => {
-    const job = jobFromRequest(request);
+    const job = await jobFromRequest(request);
+    const owner = ownerFromJobAccess(job);
     const input = request.body ?? {};
     const safeName = sanitizeFilename(input.name);
     const size = Number(input.size);
@@ -1003,6 +991,11 @@ export function createApp(options = {}) {
         && resumed.size === size
         && resumed.lastModified === lastModified
       ) {
+        const resumedOwner = normalizePipelineOwner(
+          resumed.owner === undefined ? owner : resumed.owner,
+          job.jobId,
+        );
+        assertPipelineOwnerAccess(owner, resumedOwner, job.jobId);
         const parts = await listAllParts(s3, bucket, resumed.key, resumed.multipartUploadId);
         response.json({
           provider: 's3-direct',
@@ -1034,6 +1027,7 @@ export function createApp(options = {}) {
       sessionId: crypto.randomUUID(),
       multipartUploadId: created.UploadId,
       jobId: job.jobId,
+      owner,
       chatId: job.chatId,
       key,
       name: safeName,
@@ -1060,7 +1054,7 @@ export function createApp(options = {}) {
   }));
 
   app.post('/api/uploads/:uploadId/chunks/:index', asyncRoute(async (request, response) => {
-    const { session } = assertSession(request);
+    const { session } = await assertSession(request);
     const index = Number(request.params.index);
     const totalChunks = Math.ceil(session.size / session.chunkSize);
     if (!Number.isSafeInteger(index) || index < 0 || index >= totalChunks) {
@@ -1080,7 +1074,7 @@ export function createApp(options = {}) {
   }));
 
   app.post('/api/uploads/:uploadId/complete', asyncRoute(async (request, response) => {
-    const { job, session } = assertSession(request);
+    const { job, session } = await assertSession(request);
     const parts = await listAllParts(s3, bucket, session.key, session.multipartUploadId);
     const expectedParts = Math.ceil(session.size / session.chunkSize);
     if (parts.length !== expectedParts) {
@@ -1108,6 +1102,7 @@ export function createApp(options = {}) {
         version: 1,
         taskId: session.sessionId,
         jobId: job.jobId,
+        owner: normalizePipelineOwner(session.owner === undefined ? ownerFromJobAccess(job) : session.owner, job.jobId),
         source: job.source || 'telegram',
         chatId: job.chatId || null,
         userId: job.userId || null,
@@ -1155,7 +1150,7 @@ export function createApp(options = {}) {
 
   app.get('/api/pipeline', asyncRoute(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
-    const job = jobFromRequest(request);
+    const job = await jobFromRequest(request);
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const objects = await listPrefix(s3, bucket, `.status/${job.jobId}/`);
     const actionObjects = await listPrefix(s3, bucket, `.actions/${job.jobId}/`);
@@ -1212,8 +1207,20 @@ export function createApp(options = {}) {
   }));
 
   app.post('/api/pipeline/:taskId/retry', asyncRoute(async (request, response) => {
-    const job = jobFromRequest(request);
+    const job = await jobFromRequest(request);
     const taskId = safeIdentifier(request.params.taskId, 'taskId');
+    let sourceTask;
+    try {
+      sourceTask = await pipelineRuntime.task(job.jobId, taskId);
+    } catch (error) {
+      if (error instanceof PipelineError && error.status === 404) throw new PipelineOwnerError();
+      throw error;
+    }
+    assertPipelineOwnerAccess(
+      ownerFromJobAccess(job),
+      ownerFromTask(sourceTask, job.jobId, taskId),
+      job.jobId,
+    );
     response.json(await pipelineRuntime.retry(job.jobId, taskId));
   }));
 
@@ -1223,7 +1230,7 @@ export function createApp(options = {}) {
   }));
 
   app.post('/api/pipeline/:taskId/actions', asyncRoute(async (request, response) => {
-    const job = jobFromRequest(request);
+    const job = await jobFromRequest(request);
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const taskId = safeIdentifier(request.params.taskId, 'taskId');
     const createdAction = await pipelineRuntime.withTask(job.jobId, taskId, async () => {
@@ -1231,6 +1238,17 @@ export function createApp(options = {}) {
     if (status.jobId !== job.jobId || status.taskId !== taskId) {
       throw new HttpError(409, 'Ролик не принадлежит этой заявке');
     }
+    let sourceTask;
+    try {
+      sourceTask = await objectJson(s3, bucket, queueKey(job.jobId, taskId));
+    } catch (error) {
+      if (error?.name === 'NoSuchKey' || error?.$metadata?.httpStatusCode === 404) {
+        throw new PipelineOwnerError();
+      }
+      throw error;
+    }
+    const owner = ownerFromTask(sourceTask, job.jobId, taskId);
+    assertPipelineOwnerAccess(ownerFromJobAccess(job), owner, job.jobId);
     const kind = String(request.body?.kind ?? '').toUpperCase();
     if (!['REVISION', 'APPROVE'].includes(kind)) throw new HttpError(400, 'Неизвестное действие');
     if (kind === 'REVISION' && !['READY_FOR_REVIEW', 'APPROVED'].includes(status.state)) {
@@ -1275,6 +1293,7 @@ export function createApp(options = {}) {
       actionId,
       jobId: job.jobId,
       taskId,
+      owner,
       localJobId: status.localJobId,
       resultKey: status.resultKey || null,
       resultAttemptId: status.resultAttemptId || null,
@@ -1333,6 +1352,7 @@ export function createApp(options = {}) {
 
   app.post('/api/worker/actions/:actionId/claim', asyncRoute(async (request, response) => {
     requireWorker(request, env);
+    requireBridgeVersion(request);
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const actionId = safeIdentifier(request.params.actionId, 'actionId');
     const jobId = safeIdentifier(request.body?.jobId, 'jobId');
@@ -1391,6 +1411,7 @@ export function createApp(options = {}) {
 
   app.post('/api/worker/tasks/:taskId/claim', asyncRoute(async (request, response) => {
     requireWorker(request, env);
+    requireBridgeVersion(request);
     if (!bucket) throw new Error('S3_BUCKET is not configured');
     const taskId = safeIdentifier(request.params.taskId, 'taskId');
     const jobId = safeIdentifier(request.body?.jobId, 'jobId');
@@ -1453,7 +1474,7 @@ export function createApp(options = {}) {
   }));
 
   app.delete('/api/uploads/:uploadId', asyncRoute(async (request, response) => {
-    const { session } = assertSession(request);
+    const { session } = await assertSession(request);
     await s3.send(new AbortMultipartUploadCommand({
       Bucket: bucket,
       Key: session.key,
@@ -1463,7 +1484,7 @@ export function createApp(options = {}) {
   }));
 
   app.get('/api/files', asyncRoute(async (request, response) => {
-    const job = jobFromRequest(request);
+    const job = await jobFromRequest(request);
     const listed = await s3.send(new ListObjectsV2Command({
       Bucket: bucket,
       Prefix: `${job.jobId}/`,
@@ -1519,19 +1540,33 @@ export function createApp(options = {}) {
     response.json({ ok: true, handled: true });
   }));
 
-  app.post('/api/admin/configure-cors', asyncRoute(async (request, response) => {
-    const supplied = request.headers['x-admin-secret'] ?? '';
-    if (!env.ADMIN_SECRET || supplied !== env.ADMIN_SECRET) throw new HttpError(401, 'Доступ запрещён');
+  const requireAdmin = (request, response, next) => {
+    response.setHeader('Cache-Control', 'no-store');
+    const expected = Buffer.from(String(env.ADMIN_SECRET ?? ''));
+    const supplied = Buffer.from(typeof request.headers['x-admin-secret'] === 'string' ? request.headers['x-admin-secret'] : '');
+    if (!expected.length || expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
+      throw new HttpError(401, 'Доступ запрещён');
+    }
+    next();
+  };
+
+  app.get('/api/admin/auth-check', requireAdmin, (request, response) => {
+    response.json({ ok: true });
+  });
+
+  app.post('/api/admin/configure-cors', requireAdmin, asyncRoute(async (request, response) => {
     await configureBucketCors(s3, bucket, env);
     response.json({ ok: true });
   }));
 
-  app.post('/api/admin/cleanup', asyncRoute(async (request, response) => {
-    const supplied = request.headers['x-admin-secret'] ?? '';
-    if (!env.ADMIN_SECRET || supplied !== env.ADMIN_SECRET) throw new HttpError(401, 'Доступ запрещён');
-    if (!bucket) throw new Error('S3_BUCKET is not configured');
-    const retentionHours = integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS);
-    response.json({ ok: true, retentionHours, ...(await cleanupExpiredObjects(s3, bucket, retentionHours)) });
+  app.post('/api/admin/cleanup', requireAdmin, asyncRoute(async (request, response) => {
+    try {
+      const report = await reportStorageRetention({ s3, bucket, retentionHours: env.RETENTION_HOURS ?? DEFAULT_RETENTION_HOURS });
+      response.json({ ok: true, ...report });
+    } catch (error) {
+      if (error instanceof StorageCleanupReportError) throw new HttpError(503, 'Отчёт хранилища недоступен. Файлы и загрузки не изменены; проверьте доступ к S3 и RETENTION_HOURS (1–8760 часов)');
+      throw error;
+    }
   }));
 
   app.use(express.static(PUBLIC_DIR, {
@@ -1544,7 +1579,7 @@ export function createApp(options = {}) {
       next(error);
       return;
     }
-    const publicError = error instanceof HttpError || error instanceof AccountError || error instanceof PipelineError;
+    const publicError = error instanceof HttpError || error instanceof AccountError || error instanceof PipelineError || error instanceof PipelineOwnerError;
     if (!publicError) console.error(error);
     const status = publicError ? error.status : 500;
     if (error instanceof AccountRateLimitError) {
@@ -1552,7 +1587,7 @@ export function createApp(options = {}) {
     }
     response.status(status).json({
       error: status === 500 ? 'Внутренняя ошибка сервера' : error.message,
-      ...(error instanceof AccountError ? { code: error.code } : {}),
+      ...(error instanceof AccountError || (error instanceof HttpError && error.code) ? { code: error.code } : {}),
     });
   });
 
@@ -1569,19 +1604,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   configureBucketCors(s3, env.S3_BUCKET, env)
     .then(() => console.log('Storage CORS synchronized'))
     .catch((error) => console.error('Storage CORS sync failed', error));
-  const cleanup = () => {
-    if (!env.S3_BUCKET) return;
-    cleanupExpiredObjects(
-      s3,
-      env.S3_BUCKET,
-      integer(env.RETENTION_HOURS, DEFAULT_RETENTION_HOURS),
-    ).then(({ deleted, aborted }) => {
-      if (deleted || aborted) console.log(`Storage cleanup: deleted=${deleted}, aborted=${aborted}`);
-    }).catch((error) => console.error('Storage cleanup failed', error));
-  };
-  cleanup();
-  const timer = setInterval(cleanup, 60 * 60 * 1000);
-  timer.unref();
   app.listen(port, '0.0.0.0', () => {
     console.log(`Timeweb upload API listening on 0.0.0.0:${port}`);
   });

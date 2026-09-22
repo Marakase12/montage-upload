@@ -1,5 +1,17 @@
 # MontageAI account architecture
 
+## Document status
+
+This is a **target architecture**, not a checklist of features already deployed.
+The current implementation is hybrid: accounts/projects use the account store,
+while queue/status/action artifacts still use S3 JSON and the local executor keeps
+job artifacts on Windows. The entity list and recommended S3 layout below are a
+destination, not an assertion that those tables and object paths all exist today.
+
+For implemented local changes, rollout boundaries and current limitations, see
+[commercial hardening](COMMERCIAL_HARDENING.md). Work and verification status are
+tracked separately in [the commercial backlog](COMMERCIAL_BACKLOG.md).
+
 ## Decision
 
 MontageAI uses Timeweb Cloud as the control plane for the web product:

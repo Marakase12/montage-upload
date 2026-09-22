@@ -344,6 +344,11 @@ export class MemoryAccountStore {
     return copy(project?.userId === userId ? project : null);
   }
 
+  async findProjectByJobId(jobId) {
+    const projectId = this.projectsByJobId.get(jobId);
+    return copy(projectId ? this.projects.get(projectId) : null);
+  }
+
   async consumeRateLimit(input) {
     const now = new Date(input.now ?? Date.now());
     const nowMs = now.getTime();
@@ -599,6 +604,14 @@ export class PostgresAccountStore {
     const result = await this.pool.query(
       `SELECT * FROM projects WHERE job_id = $1 AND user_id = $2 LIMIT 1`,
       [jobId, userId],
+    );
+    return mapProject(result.rows[0]);
+  }
+
+  async findProjectByJobId(jobId) {
+    const result = await this.pool.query(
+      `SELECT * FROM projects WHERE job_id = $1 LIMIT 1`,
+      [jobId],
     );
     return mapProject(result.rows[0]);
   }
