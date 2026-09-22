@@ -185,6 +185,90 @@ test('старый /api/jobs автоматически связывает но�
   });
 });
 
+// Unlike MemoryAccountStore, PostgreSQL rejects a web-* job ID in a UUID column
+// before it can return an empty result. Keep this contract in the route tests.
+function postgresProjectPool(rows, queries = []) {
+  return {
+    async query(sql, values) {
+      queries.push({ sql, values });
+      const byJob = sql.includes('WHERE job_id = $1');
+      assert.ok(byJob || sql.includes('WHERE id = $1'));
+      assert.match(sql, /AND user_id = \$2/);
+      if (!byJob && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(values[0])) {
+        throw Object.assign(new Error('invalid input syntax for type uuid'), { code: '22P02' });
+      }
+      return { rows: rows.filter((row) => (
+        row[byJob ? 'job_id' : 'id'] === values[0] && row.user_id === values[1]
+      )) };
+    },
+  };
+}
+
+test('Postgres project UUID lookup skips job IDs without sending an invalid UUID query', async () => {
+  const queries = [];
+  const postgres = new PostgresAccountStore({ pool: postgresProjectPool([], queries) });
+  const owner = '12345678-1234-4234-8234-123456789abc';
+  for (const identifier of ['web-db1478ac-917a-40a1-a9a6-a238e88cbd6a', 'not-a-uuid', '', null]) {
+    assert.equal(await postgres.findProjectForUser(identifier, owner), null);
+  }
+  assert.equal(queries.length, 0);
+  assert.equal(await postgres.findProjectForUser('87654321-1234-4234-8234-123456789abc', owner), null);
+  assert.equal(queries.length, 1);
+  assert.match(queries[0].sql, /WHERE id = \$1 AND user_id = \$2/);
+
+  const failure = Object.assign(new Error('Database unavailable'), { code: '08006' });
+  const unavailable = new PostgresAccountStore({ pool: { query: async () => { throw failure; } } });
+  await assert.rejects(unavailable.findProjectForUser(owner, owner), (error) => error === failure);
+});
+
+test('project detail and access accept UUID and web job ID with PostgreSQL semantics, without crossing owners', async (context) => {
+  const store = new MemoryAccountStore();
+  const rows = [];
+  const postgres = new PostgresAccountStore({ pool: postgresProjectPool(rows) });
+  store.findProjectForUser = postgres.findProjectForUser.bind(postgres);
+  store.findProjectByJobIdForUser = postgres.findProjectByJobIdForUser.bind(postgres);
+  await withAccountServer(context, async ({ origin }) => {
+    const owner = await register(origin, 'project-owner@example.com');
+    const other = await register(origin, 'project-other@example.com');
+    const created = await jsonRequest(origin, '/api/projects', {
+      headers: { Cookie: owner.cookie }, body: { title: 'Ready project' },
+    });
+    assert.equal(created.status, 201);
+    const { project } = await created.json();
+    rows.push({
+      id: project.id, job_id: project.jobId, user_id: owner.payload.user.id,
+      title: project.title, source: project.source, processing: project.processing,
+      created_at: new Date(project.createdAt), updated_at: new Date(project.updatedAt),
+    });
+    for (const identifier of [project.id, project.jobId]) {
+      for (const [suffix, method] of [['', 'GET'], ['/access', 'POST']]) {
+        const path = `/api/projects/${identifier}${suffix}`;
+        const opened = await jsonRequest(origin, path, { method, headers: { Cookie: owner.cookie } });
+        assert.equal(opened.status, 200, `${method} ${path}`);
+        const payload = await opened.json();
+        assert.equal(payload.project.id, project.id);
+        if (suffix) {
+          const job = verifyToken(payload.token, tokenSecret, 'job');
+          assert.equal(job.jobId, project.jobId);
+          assert.equal(job.userId, owner.payload.user.id);
+        }
+        const denied = await jsonRequest(origin, path, { method, headers: { Cookie: other.cookie } });
+        assert.equal(denied.status, 404);
+        assert.deepEqual(await denied.json(), { error: 'Проект не найден' });
+        assert.equal((await jsonRequest(origin, path, { method })).status, 401);
+      }
+    }
+    for (const identifier of ['web-missing-project', '87654321-1234-4234-8234-123456789abc']) {
+      for (const [suffix, method] of [['', 'GET'], ['/access', 'POST']]) {
+        const missing = await jsonRequest(origin, `/api/projects/${identifier}${suffix}`, {
+          method, headers: { Cookie: owner.cookie },
+        });
+        assert.equal(missing.status, 404);
+      }
+    }
+  }, { store });
+});
+
 test('старый job можно атомарно привязать только к одному аккаунту', async (context) => {
   await withAccountServer(context, async ({ origin }) => {
     const first = await register(origin, 'owner@example.com');

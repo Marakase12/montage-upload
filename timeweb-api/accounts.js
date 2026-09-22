@@ -593,6 +593,10 @@ export class PostgresAccountStore {
   }
 
   async findProjectForUser(projectId, userId) {
+    // Routes also accept text job IDs (web-*). PostgreSQL would reject those
+    // against projects.id (uuid) before the owner-scoped job lookup can run.
+    if (typeof projectId !== 'string'
+        || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(projectId)) return null;
     const result = await this.pool.query(
       `SELECT * FROM projects WHERE id = $1 AND user_id = $2 LIMIT 1`,
       [projectId, userId],
