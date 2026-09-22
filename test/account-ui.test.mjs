@@ -5,6 +5,12 @@ import test from 'node:test';
 const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 
+test('согласие различает срок доступа и фактическое удаление файлов', () => {
+  assert.match(html, /Срок доступа через сервис — <b id="retentionValue">/);
+  assert.match(html, /Автоматическое удаление файлов пока отключено/);
+  assert.doesNotMatch(html, /Они будут удалены через/);
+});
+
 test('личный кабинет содержит вход, регистрацию, проекты и безопасный выход', () => {
   for (const id of [
     'authDialog',

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light">
-  <meta name="montage-release" content="studio-20260922-recovery-v1">
+  <meta name="montage-release" content="studio-20260922-safety-v2">
   <meta name="description" content="Загрузите видео, следите за обработкой и получите готовый ролик в MontageAI">
   <title>MontageAI — личная видеостудия</title>
   <meta name="theme-color" content="#f6f5f1">
@@ -165,7 +165,7 @@
               <details class="creation-note"><summary>Добавить заметку к проекту <span>Необязательно</span></summary><label class="field"><span>Заметка</span><textarea id="processingRequest" name="processingRequest" maxlength="500" rows="2" aria-describedby="creationNoteHelp" placeholder="Например: выпуск про новый сервис"></textarea></label><p id="creationNoteHelp">Сохраним вместе с проектом. Это не команда монтажа: музыку, текст и другие детали можно изменить после просмотра результата.</p></details>
               <label class="consent-row">
                 <input id="projectConsent" type="checkbox" required>
-                <span>Согласен на хранение файлов для обработки.<br>Они будут удалены через <b id="retentionValue">24 ч</b>.</span>
+                <span>Согласен на хранение файлов для обработки.<br>Срок доступа через сервис — <b id="retentionValue">24 ч</b>.<br>Автоматическое удаление файлов пока отключено.</span>
               </label>
               <div class="create-action"><button id="orderSubmit" class="primary-button start-button" type="submit" disabled>Начать монтаж <span aria-hidden="true">↗</span></button><span class="action-note">Сначала выберите видео и подтвердите согласие</span></div>
               <p class="form-status" id="orderStatus" role="status"></p>
