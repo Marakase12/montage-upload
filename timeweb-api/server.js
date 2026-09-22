@@ -946,9 +946,10 @@ export function createApp(options = {}) {
     response.status(ready ? 200 : 503).json({
       ok: ready,
       cloud: true,
-      release: 'studio-20260922-smart-edit-v1',
+      release: 'studio-20260922-smart-edit-v2',
       minimumBridgeVersion: MINIMUM_BRIDGE_VERSION,
       smartEditProposalsVersion: 1,
+      speechCleanupProposalsVersion: 1,
       ownerIsolationVersion: 1,
       recoveryAvailable: Boolean(accountStore?.pool) || env.NODE_ENV !== 'production',
       provider: 'timeweb-s3',

@@ -116,8 +116,9 @@ test('health advertises smart-edit release and minimum owner-aware bridge protoc
   const f = await fixture(context);
   const health = await f.request('/api/health');
   assert.equal(health.status, 200);
-  assert.equal(health.body.release, 'studio-20260922-smart-edit-v1');
+  assert.equal(health.body.release, 'studio-20260922-smart-edit-v2');
   assert.equal(health.body.smartEditProposalsVersion, 1);
+  assert.equal(health.body.speechCleanupProposalsVersion, 1);
   assert.equal(health.body.minimumBridgeVersion, 3);
   assert.equal(health.body.ownerIsolationVersion, 1);
 });

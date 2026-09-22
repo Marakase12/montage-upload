@@ -1,4 +1,4 @@
-import { freshProcessingOptions, sourceProblem, canStartCreation, projectMatches, previewIdentity, canApplySmartEdit } from './studio-state.js?v=studio-20260922-smart-edit-v1';
+import { freshProcessingOptions, sourceProblem, canStartCreation, projectMatches, previewIdentity, canApplySmartEdit } from './studio-state.js?v=studio-20260922-smart-edit-v2';
 
 const dropzone = document.querySelector('#dropzone');
 const fileInput = document.querySelector('#fileInput');
@@ -432,7 +432,7 @@ function updateSmartEditCard() {
     : smartEditEnabled.checked ? 'Включён · решение за вами' : 'Выключен · без дополнительных предложений';
   document.querySelector('#smartEditHelp').textContent = isLong
     ? 'В LONG сначала предложим сильные фрагменты. Умный монтаж целого ролика доступен в соседнем режиме.'
-    : smartEditEnabled.checked ? 'Предложу более сильное начало и уберу затянутые паузы — только после вашего «Применить».'
+    : smartEditEnabled.checked ? 'Найду случайные повторы речи, затянутые паузы и сильное начало. Покажу план — сокращу только после вашего «Применить».'
       : 'Оформим видео целиком, без дополнительных предложений по сокращению. Режим можно включить перед загрузкой.';
   document.querySelector('.smart-edit-promise').textContent = isLong ? 'Для LONG подбор моментов работает отдельно.'
     : smartEditEnabled.checked ? '↳ План появится в чате проекта. Без скрытых сокращений.' : '↳ Полная длительность исходника сохраняется.';
@@ -461,6 +461,22 @@ function appendSmartEditChat(card, task) {
     const reason = document.createElement('span');
     reason.textContent = change.reason;
     item.append(title, reason);
+    if (Array.isArray(change.cuts)) {
+      const cuts = document.createElement('ul');
+      cuts.className = 'smart-speech-cuts';
+      for (const cut of change.cuts) {
+        const detail = document.createElement('li');
+        const range = document.createElement('strong');
+        range.textContent = `${cut.sourceStart.toFixed(2)}–${cut.sourceEnd.toFixed(2)} с исходника`;
+        const quote = document.createElement('span');
+        quote.textContent = `Убрать «${cut.removedText}» → оставить «${cut.keptText}»`;
+        const why = document.createElement('span');
+        why.textContent = cut.reason;
+        detail.append(range, quote, why);
+        cuts.append(detail);
+      }
+      item.append(cuts);
+    }
     changes.append(item);
   }
   if (changes.children.length) bubble.append(changes);
@@ -486,7 +502,8 @@ function appendSmartEditChat(card, task) {
       if (smartPending.has(plan.id) || !canApplySmartEdit(task)) return;
       smartPending.add(plan.id);
       try {
-        await sendPipelineAction(task, { kind: 'REVISION', smartEditProposalId: plan.id, confirmation: 'APPLY_SMART_EDIT' }, feedback, [button]);
+        await sendPipelineAction(task, { kind: 'REVISION', smartEditProposalId: plan.id, confirmation: 'APPLY_SMART_EDIT',
+          ...(plan.version === 2 ? { smartEditProposalVersion: 2 } : {}) }, feedback, [button]);
       } finally { smartPending.delete(plan.id); }
     });
     bubble.append(consent, button, feedback);
@@ -1884,7 +1901,7 @@ async function createProject() {
     const accountProject = Boolean(currentUser && authEnabled && accountIsSameOrigin);
     if (processingMode.value !== 'long' && smartEditEnabled.checked) {
       const capability = await api('/api/health', { timeoutMs: 8000 });
-      if (capability.smartEditProposalsVersion !== 1) throw new Error('Умный монтаж ещё не подключён на сервере. Попробуйте позже или выключите эту опцию для обычного монтажа.');
+      if (capability.smartEditProposalsVersion !== 1 || capability.speechCleanupProposalsVersion !== 1) throw new Error('Обновление умного монтажа ещё не подключено на сервере. Попробуйте позже или выключите эту опцию для обычного монтажа.');
     }
     const result = await api(accountProject ? '/api/projects' : '/api/jobs', {
       method: 'POST',

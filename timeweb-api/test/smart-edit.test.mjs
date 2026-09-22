@@ -29,6 +29,33 @@ test('smart plan schema is bounded and strips private worker metadata', () => {
 
 test('legacy worker cannot claim smart editing but ordinary jobs remain compatible', () => {
   assert.throws(() => requireSmartBridge(3, true), { status: 426 });
-  requireSmartBridge(4, true);
+  assert.throws(() => requireSmartBridge(4, true), { status: 426 });
+  requireSmartBridge(5, true);
   requireSmartBridge(3, false);
+});
+
+const speechCut = { id: 'repeat-1-3-4', sourceStart: 4.46, sourceEnd: 5.46,
+  removedText: 'я я', keptText: 'я', reason: 'Повторная попытка начать фразу' };
+const speechPlan = { ...proposal, version: 2, changes: [{ intent: 'REMOVE_SPEECH_RETAKES', value: '',
+  title: 'Убрать повторы', reason: 'Сохранить последнюю фразу', cuts: [speechCut] }] };
+
+test('v2 exposes grounded cut descriptions but confirmation still sends only proposal identity', () => {
+  assert.deepEqual(normalizeSmartProposal(speechPlan), speechPlan);
+  const action = confirmedSmartEditAction({ smartEditProposal: speechPlan }, { kind: 'REVISION',
+    smartEditProposalId: speechPlan.id, confirmation: 'APPLY_SMART_EDIT', smartEditProposalVersion: 2, cuts: [{ sourceStart: 0, sourceEnd: 29 }] });
+  assert.deepEqual(action, { smartEditProposalId: speechPlan.id, confirmation: 'APPLY_SMART_EDIT' });
+  assert.throws(() => normalizeSmartProposal({ ...speechPlan, version: 1 }));
+  assert.throws(() => confirmedSmartEditAction({ smartEditProposal: speechPlan }, { kind: 'REVISION',
+    smartEditProposalId: speechPlan.id, confirmation: 'APPLY_SMART_EDIT' }), { status: 409 });
+});
+
+test('v2 rejects unsafe, overlapping, oversized or nonfinite speech cuts', () => {
+  for (const cuts of [[], [speechCut, speechCut], Array(21).fill(speechCut),
+    [{ ...speechCut, sourceStart: NaN }], [{ ...speechCut, sourceEnd: Infinity }],
+    [{ ...speechCut, sourceEnd: speechCut.sourceStart }], [{ ...speechCut, sourceStart: -1 }],
+    [{ ...speechCut, sourceStart: false }], [{ ...speechCut, sourceEnd: 20 }],
+    [{ ...speechCut, removedText: '' }], [{ ...speechCut, keptText: 'x'.repeat(301) }]]) {
+    assert.throws(() => normalizeSmartProposal({ ...speechPlan, changes: [{ ...speechPlan.changes[0], cuts }] }));
+  }
+  assert.throws(() => normalizeSmartProposal({ ...speechPlan, beforeSeconds: 3, afterSeconds: 2 }));
 });

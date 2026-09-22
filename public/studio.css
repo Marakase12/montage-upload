@@ -770,6 +770,8 @@ dialog::backdrop { background: #13241ec4; backdrop-filter: blur(5px); }
   .project-card { grid-template-columns: 88px minmax(0, 1fr); }
 }
 .format-picker { border: 0; padding: 0; margin: 5px 0; min-width: 0; }
+.smart-chat-bubble .smart-speech-cuts { margin: 10px 0 0; padding: 12px 14px; border-left: 2px solid #b8cfc3; background: #f4f7f3; border-radius: 0 8px 8px 0; list-style: none; }
+.smart-speech-cuts li { overflow-wrap: anywhere; }
 .worker-notice { margin: 0 0 20px; padding: 14px 18px; border: 1px solid #e2d9bb; border-radius: 12px; background: #faf6e9; color: #665b3f; font-size: 13px; line-height: 1.5; }
 .server-state.waiting { color: #8b7136; }
 .server-state.waiting > span:first-child { background: #c6a14a; }

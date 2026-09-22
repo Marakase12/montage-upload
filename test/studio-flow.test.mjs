@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
-import { freshProcessingOptions, sourceProblem, canStartCreation, projectMatches, previewIdentity } from '../public/studio-state.js';
+import { freshProcessingOptions, sourceProblem, canStartCreation, projectMatches, previewIdentity, canApplySmartEdit } from '../public/studio-state.js';
 
 test('creation requires a nonempty supported video, consent and no in-flight creation', () => {
   const file = { name: 'phone.MOV', type: '', size: 1024 };
@@ -70,7 +70,7 @@ function harness() {
   for (const [id, ratio] of [['#aspect916', '9:16'], ['#aspect11', '1:1'], ['#aspect169', '16:9']]) element(id).value = ratio;
   element('#aspect916').checked = true;
   const context = vm.createContext({
-    freshProcessingOptions, sourceProblem, canStartCreation, projectMatches, previewIdentity,
+    freshProcessingOptions, sourceProblem, canStartCreation, projectMatches, previewIdentity, canApplySmartEdit,
     document: { querySelector: element, querySelectorAll: () => [], createElement: () => new Element(), addEventListener() {} },
     window: { location: { origin: 'http://localhost', href: 'http://localhost/', hostname: 'localhost' } },
     URL, URLSearchParams, sessionStorage: storage, localStorage: storage, history: { replaceState() {} },
@@ -83,6 +83,8 @@ function harness() {
   vm.runInContext(`globalThis.testState = {
     select: handleSelectedFiles, reset: resetProcessingOptions, review: openReview, poll: loadPipeline,
     projects: loadAccountProjects,
+    smartChat: appendSmartEditChat,
+    setAction(stub) { sendPipelineAction = stub; },
     create: createProject, files: loadFiles, retry: retryPipelineTask, worker: updateWorkerState,
     addActiveUpload() { tasks.add({ state: 'uploading' }); },
     setUser(user) { currentUser = user; authEnabled = true; },
@@ -97,6 +99,35 @@ function harness() {
   };`, context);
   return { element, state: context.testState };
 }
+
+test('speech-cleanup chat shows source times and quotes as text; confirmation sends no cut instructions', async () => {
+  const { state } = harness();
+  const card = new Element();
+  const proposal = { version: 2, id: 'a'.repeat(64), state: 'PROPOSED', beforeSeconds: 12, afterSeconds: 11,
+    message: 'Пока ничего не сокращал.', changes: [{ title: 'Убрать повторы', reason: 'Сохранить последнюю попытку',
+      cuts: [{ sourceStart: .46, sourceEnd: 1.46, removedText: '<script>я я</script>', keptText: 'я', reason: 'Повтор' }] }] };
+  state.smartChat(card, { state: 'READY_FOR_REVIEW', resultAvailability: 'AVAILABLE', smartEditProposal: proposal });
+  const all = (node) => [node, ...node.children.flatMap(all)];
+  const nodes = all(card);
+  assert.ok(nodes.some(n => n.textContent === '0.46–1.46 с исходника'));
+  const quote = nodes.find(n => n.textContent?.includes('<script>'));
+  assert.equal(quote.innerHTML, undefined);
+  assert.equal(quote.textContent, 'Убрать «<script>я я</script>» → оставить «я»');
+  const button = nodes.find(n => n.textContent === 'Применить план');
+  assert.equal(button.disabled, false);
+  let calls = 0;
+  let finish;
+  state.setAction(async (_task, body) => {
+    calls++;
+    assert.deepEqual(JSON.parse(JSON.stringify(body)), { kind: 'REVISION', smartEditProposalId: proposal.id, confirmation: 'APPLY_SMART_EDIT', smartEditProposalVersion: 2 });
+    await new Promise(resolve => { finish = resolve; });
+  });
+  const first = button.fire('click');
+  await button.fire('click');
+  assert.equal(calls, 1);
+  finish();
+  await first;
+});
 
 test('actual selection and consent handlers never create or upload; explicit submit does', async () => {
   const { element, state } = harness();

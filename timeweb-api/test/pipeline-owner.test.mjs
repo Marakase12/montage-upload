@@ -13,19 +13,21 @@ const SECRET = 'synthetic-owner-tests-not-a-real-key';
 const USER_A = '11111111-1111-4111-8111-111111111111';
 const USER_B = '22222222-2222-4222-8222-222222222222';
 
-test('smart proposal survives queue and requires explicit scoped one-time acceptance', async context => {
+for (const proposalVersion of [1, 2]) test(`smart proposal v${proposalVersion} survives queue and requires explicit scoped one-time acceptance`, async context => {
   const api = await fixture(context);
   const created = await api.create(null, { processing: { smartEditEnabled: true } });
   const { task, auth } = await api.upload(created.token);
   assert.equal(task.processing.smartEditEnabled, true);
   api.ready(task);
   const key = `.status/${task.jobId}/${task.taskId}.json`;
-  const suggestion = { version: 1, id: 'a'.repeat(64), state: 'PROPOSED', requiresConfirmation: true,
+  const suggestion = { version: proposalVersion, id: 'a'.repeat(64), state: 'PROPOSED', requiresConfirmation: true,
     message: 'Предлагаю убрать паузы', beforeSeconds: 30, afterSeconds: 28,
     changes: [{ intent: 'REMOVE_ALL_PAUSES', value: '', title: 'Убрать паузы', reason: 'Плотнее темп' }] };
+  if (proposalVersion === 2) suggestion.changes.push({ intent: 'REMOVE_SPEECH_RETAKES', value: '', title: 'Убрать повторы', reason: 'Последняя попытка',
+    cuts: [{ id: 'repeat-1-3-4', sourceStart: 4.46, sourceEnd: 5.46, removedText: 'я я', keptText: 'я', reason: 'Повтор' }] });
   api.objects.get(key).smartEditProposal = suggestion;
   const endpoint = `/api/pipeline/${task.taskId}/actions`;
-  const body = { kind: 'REVISION', smartEditProposalId: suggestion.id, confirmation: 'APPLY_SMART_EDIT' };
+  const body = { kind: 'REVISION', smartEditProposalId: suggestion.id, confirmation: 'APPLY_SMART_EDIT', smartEditProposalVersion: proposalVersion };
   const before = structuredClone([...api.objects]);
   for (const patch of [{ confirmation: undefined }, { smartEditProposalId: 'b'.repeat(64) }, { kind: 'APPROVE' }]) {
     const denied = await api.request(endpoint, { ...body, ...patch }, auth);
@@ -46,7 +48,8 @@ test('smart proposal survives queue and requires explicit scoped one-time accept
   const workerAuth = { 'X-Worker-Secret': 'owner-test-worker' };
   assert.equal((await api.request(claimPath, { jobId: task.jobId, workerId: 'worker-smart01', bridgeVersion: 3 }, workerAuth)).status, 426);
   assert.equal(api.objects.get(key).state, 'READY_FOR_REVIEW');
-  const claimed = await api.request(claimPath, { jobId: task.jobId, workerId: 'worker-smart01', bridgeVersion: 4 }, workerAuth);
+  assert.equal((await api.request(claimPath, { jobId: task.jobId, workerId: 'worker-smart01', bridgeVersion: 4 }, workerAuth)).status, 426);
+  const claimed = await api.request(claimPath, { jobId: task.jobId, workerId: 'worker-smart01', bridgeVersion: 5 }, workerAuth);
   assert.equal(claimed.status, 200);
   assert.equal((await claimed.json()).action.smartEditProposalId, suggestion.id);
 });
